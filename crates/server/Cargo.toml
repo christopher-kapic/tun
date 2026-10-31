@@ -1,0 +1,53 @@
+[package]
+name = "cockpit-tunnel-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cockpit-tunnel-server"
+path = "src/main.rs"
+
+[dependencies]
+cockpit-tunnel-protocol.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { workspace = true, features = ["handshake"] }
+tokio-yamux.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustls.workspace = true
+
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1"] }
+hex = "0.4"
+hmac = "0.12"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+instant-acme = "0.7"
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustls-pemfile = "2"
+sha1 = "0.10"
+subtle = "2"
+time = "0.3"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+url = "2"
+utoipa = "5"
+x509-parser = "0.16"

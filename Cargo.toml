@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/server", "crates/client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+# Features are chosen per crate: the protocol needs none, the server only
+# `handshake` (accept key), the client `connect` + rustls.
+tokio-tungstenite = { version = "0.26", default-features = false }
+tokio-yamux = "0.3"
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+cockpit-tunnel-protocol = { path = "crates/protocol" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
