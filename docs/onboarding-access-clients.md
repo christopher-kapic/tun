@@ -61,12 +61,17 @@ Target layout for `--host tunnel.kapic.io`:
 - [x] Tests for each mode, including mode changes on a live tunnel (DB unit tests for revocation
       and migration; 16-check browser run on tunnel.kapic.io, 2026-11-01).
 
-## 3. Clients
+## 3. Clients (decided 2026-11-01: link-only share default; tokens last until the client is deleted)
 
-- [ ] `client add <name>` → prints `cockpit-preview login '<code>@<host>'`; code single-use, 15 min.
-- [ ] `POST /v1/clients/enroll` trades the code for a long-lived `ctcli_` token.
-- [ ] `client list` (name, created, last used, tunnel count), `client delete <name>`
+- [x] `client add <name>` → prints `cockpit-preview login '<code>@<host>'`; code single-use, 15 min.
+- [x] `POST /v1/clients/enroll` trades the code for a long-lived `ctcli_` token.
+- [x] `client list` (name, created, last used, tunnel count), `client delete <name>`
       (revokes token, deletes its tunnels, cancels pending codes). Same via admin API.
-- [ ] Client tokens can create/list/patch/delete their own tunnels and mint their access links only.
-- [ ] `cockpit-preview login`, `cockpit-preview share <port> [--public | --password ...]`.
-- [ ] Drop the need for a baked-in server URL (login stores it).
+- [x] Client tokens can create/list/patch/delete their own tunnels and mint their access links only.
+- [x] `cockpit-preview login`, `cockpit-preview share <port> [--public | --password ...]`.
+- [x] Drop the need for a baked-in server URL (login stores it).
+
+Also: expired tunnels (and tunnels of a client deleted from the CLI) now close
+within 15 seconds (expiry sweep), not up to an hour. Verified end to end against
+tunnel.kapic.io (24 checks: login once, link/public/password shares, port reuse,
+reusable links, client isolation, stop, client delete via CLI and API).

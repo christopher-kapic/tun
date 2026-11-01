@@ -25,7 +25,11 @@ pub(crate) enum Answer {
 
 pub(crate) async fn ask(req: Request, takeover: bool, json: bool) -> anyhow::Result<Answer> {
     let paths = Paths::resolve()?;
-    match ensure_daemon(&paths, takeover).await? {
+    let (token, server) = match &req {
+        Request::Expose { token, server, .. } => (token.as_deref(), server.as_deref()),
+        _ => (None, None),
+    };
+    match ensure_daemon(&paths, takeover, token, server).await? {
         Reach::Running(stream) => match call(stream, &req, REQUEST_TIMEOUT).await? {
             Some(Response::Error { message }) => bail!("{message}"),
             Some(resp) => Ok(Answer::Response(resp)),

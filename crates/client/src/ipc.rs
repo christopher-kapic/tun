@@ -183,12 +183,19 @@ pub enum Reach {
 
 /// Connect to the daemon, starting it if needed. `takeover` lets an explicit
 /// `expose` restart a daemon that was replaced by another client.
-pub async fn ensure_daemon(paths: &Paths, takeover: bool) -> anyhow::Result<Reach> {
+/// `token`/`server` are what the request will carry (`expose` takes them from
+/// the environment, `share` from its login); a token there counts as one to start with.
+pub async fn ensure_daemon(
+    paths: &Paths,
+    takeover: bool,
+    token: Option<&str>,
+    server: Option<&str>,
+) -> anyhow::Result<Reach> {
     if let Ok(stream) = UnixStream::connect(&paths.socket).await {
         return Ok(Reach::Running(stream));
     }
     let state = Persisted::load(&paths.state_file);
-    let env_token = env_nonempty(ENV_TOKEN);
+    let env_token = token.map(str::to_string).or_else(|| env_nonempty(ENV_TOKEN));
     let new_token = |p: &Persisted| env_token.as_deref().is_some_and(|t| t != p.token);
     if let Some(p) = &state {
         if p.revoked && !new_token(p) {
@@ -204,11 +211,12 @@ pub async fn ensure_daemon(paths: &Paths, takeover: bool) -> anyhow::Result<Reac
     }
     // Fail here rather than in the detached daemon, where the error would only reach the log.
     let persisted_server = state.as_ref().filter(|p| !new_token(*p)).map(|p| p.server.as_str());
-    resolve_server(env_nonempty(ENV_SERVER).as_deref(), persisted_server)?;
+    let server = server.map(str::to_string).or_else(|| env_nonempty(ENV_SERVER));
+    resolve_server(server.as_deref(), persisted_server)?;
 
     // The daemon itself removes a stale socket, under its lock file, so a
     // concurrently starting daemon's fresh socket is never deleted here.
-    let mut child = spawn_daemon(paths)?;
+    let mut child = spawn_daemon(paths, env_token.as_deref(), server.as_deref())?;
     let deadline = Instant::now() + SPAWN_WAIT;
     loop {
         if let Ok(stream) = UnixStream::connect(&paths.socket).await {
@@ -230,7 +238,7 @@ pub async fn ensure_daemon(paths: &Paths, takeover: bool) -> anyhow::Result<Reac
     }
 }
 
-fn spawn_daemon(paths: &Paths) -> anyhow::Result<Child> {
+fn spawn_daemon(paths: &Paths, token: Option<&str>, server: Option<&str>) -> anyhow::Result<Child> {
     let exe = std::env::current_exe().context("locating the cockpit-preview executable")?;
     let log = open_log(paths)?;
     let mut cmd = std::process::Command::new(exe);
@@ -239,9 +247,16 @@ fn spawn_daemon(paths: &Paths) -> anyhow::Result<Child> {
         .stdin(Stdio::null())
         .stdout(log.try_clone().context("duplicating log handle")?)
         .stderr(log);
-    // COCKPIT_TUNNEL_TOKEN / _SERVER reach the daemon through its inherited
-    // environment, never argv (argv is visible in `ps`). Only a relative ICE
-    // file path needs fixing up because the daemon runs from `/`.
+    // COCKPIT_TUNNEL_TOKEN / _SERVER reach the daemon through its environment,
+    // never argv (argv is visible in `ps`): inherited for `expose`, set here for
+    // `share`, whose token comes from the API. Only a relative ICE file path
+    // needs fixing up because the daemon runs from `/`.
+    if let Some(t) = token {
+        cmd.env(ENV_TOKEN, t);
+    }
+    if let Some(s) = server {
+        cmd.env(ENV_SERVER, s);
+    }
     if let Some(file) = env_nonempty(ENV_ICE_FILE) {
         if let Ok(abs) = std::path::absolute(&file) {
             cmd.env(ENV_ICE_FILE, abs);

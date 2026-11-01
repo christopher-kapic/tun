@@ -10,8 +10,8 @@ WebSockets, SSE, and (through coturn) WebRTC. Private project.
 Behavior is specified in [`cockpit-tunnel-plan.md`](cockpit-tunnel-plan.md);
 module interfaces are in [`docs/module-contracts.md`](docs/module-contracts.md).
 
-**Status:** first-pass implementation, written without compiling. Start with
-the [first build pass](#first-build-pass) checklist.
+**Status:** builds, tests pass, and runs at `tunnel.kapic.io` (rootless). Recent
+work and its decisions: [`docs/onboarding-access-clients.md`](docs/onboarding-access-clients.md).
 
 ## Workspace layout
 
@@ -85,8 +85,43 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p cockpit-tunnel-s
    firewall, installs the systemd unit, self-tests, and prints the admin token
    once. Re-running `setup` changes nothing unless an answer changed.
 
+   **Rootless install** (no root after one command): run `cockpit-tunnel-server setup`
+   as a normal user. Its preflight prints one `sudo sh -c '…'` line (unprivileged
+   ports from 80, lingering, and moving an existing root install); after that,
+   setup, upgrades, and restarts need no root. Non-interactive:
+
+   ```sh
+   cockpit-tunnel-server setup --yes --host tunnel.example.com --email you@example.com \
+     --dns-token-file ~/cf-token --frame-ancestors '*'
+   ```
+
+   One hostname covers everything: the API and sandbox tunnel use it, previews are
+   `*.<host>`, TURN is `turn.<host>`, and two DNS records (`<host>`, `*.<host>`) suffice.
+
 Admin commands: `cockpit-tunnel-server status`, `token rotate`, `backup <path>`,
-`cert renew [--force]` (rotate/renew need root).
+`cert renew [--force]`, and `client add <name> | list | delete <name>` (root only
+for a root install).
+
+### Tunnels and access
+
+`POST /v1/tunnels` takes `access: {mode: "link" | "password" | "public", username,
+password}`; access links work in every mode. Previews may be framed by the sites in
+`frame_ancestors` (default `*`).
+
+### Logged-in machines
+
+`cockpit-tunnel-server client add laptop` prints a one-time (15 min) command:
+
+```sh
+cockpit-preview login 'ctenr_…@tunnel.example.com'   # on the laptop
+cockpit-preview share 3000                            # prints a one-time link
+cockpit-preview share 5173 --public                   # same tunnel, now public
+cockpit-preview link --reusable                       # another link
+cockpit-preview stop                                  # deletes the tunnel
+```
+
+A client token can manage only the tunnels it created. `client delete` revokes it
+and stops its tunnels.
 
 ## First build pass
 

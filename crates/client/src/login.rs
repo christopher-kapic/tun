@@ -75,6 +75,12 @@ fn http() -> anyhow::Result<reqwest::Client> {
 async fn decode<T: DeserializeOwned>(resp: reqwest::Response, what: &str) -> anyhow::Result<T> {
     let status = resp.status();
     let text = resp.text().await.with_context(|| what.to_string())?;
+    if status == reqwest::StatusCode::UNAUTHORIZED && what != "login" {
+        bail!(
+            "the server no longer accepts this machine's login (the client was deleted or logged in elsewhere); \
+             ask the admin for a new `cockpit-preview login` command"
+        );
+    }
     if !status.is_success() {
         let message = serde_json::from_str::<Value>(&text)
             .ok()

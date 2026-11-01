@@ -41,6 +41,27 @@ daemon to the new tunnel (ports from the old tunnel are dropped).
 expired, or token rejected), `replaced` (another client connected with the same
 token), `stopped` (no daemon and no tunnel).
 
+## Logged-in machines
+
+Outside a sandbox, a machine can create its own tunnels instead of receiving a
+tunnel token:
+
+```sh
+cockpit-preview login 'ctenr_…@tunnel.example.com'   # from `cockpit-tunnel-server client add <name>`
+cockpit-preview share 3000 [5173 …]                    # link-only; prints a one-time link per port
+cockpit-preview share 3000 --public                    # anyone with the URL
+COCKPIT_SHARE_PASSWORD=… cockpit-preview share 3000 --password [--username bob]
+cockpit-preview share 3000 --link                      # back to links only
+cockpit-preview link [--port 3000] [--reusable] [--ttl 1h]
+cockpit-preview stop                                   # also deletes the shared tunnel
+cockpit-preview logout
+```
+
+The login (server and client token) is saved in
+`$XDG_CONFIG_HOME/cockpit-preview/login.json` (0600). `share` reuses the tunnel
+it made while the daemon still serves it, so one link covers every shared
+port. `expose` also uses the logged-in server when `COCKPIT_TUNNEL_SERVER` is unset.
+
 ## Environment
 
 | Variable | Meaning |
