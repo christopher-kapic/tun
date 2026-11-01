@@ -54,11 +54,12 @@ Target layout for `--host tunnel.kapic.io`:
 
 ## 2. Access modes
 
-- [ ] `access: link | password | public` on `POST/PATCH /v1/tunnels`; stored per tunnel.
-- [ ] Access links work in every mode; in `password` mode an expired/used link shows the login page.
-- [ ] `password`: argon2 hash; login form on `/__login` (works in iframes); sets the same gate session.
-- [ ] `public`: skip the gate; everything else unchanged.
-- [ ] Tests for each mode, including mode changes on a live tunnel.
+- [x] `access: link | password | public` on `POST/PATCH /v1/tunnels`; stored per tunnel.
+- [x] Access links work in every mode; in `password` mode an expired/used link shows the login page.
+- [x] `password`: argon2 hash; login form on `/__login` (works in iframes); sets the same gate session.
+- [x] `public`: skip the gate; everything else unchanged.
+- [x] Tests for each mode, including mode changes on a live tunnel (DB unit tests for revocation
+      and migration; 16-check browser run on tunnel.kapic.io, 2026-11-01).
 
 ## 3. Clients
 
