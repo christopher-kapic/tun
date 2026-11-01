@@ -81,6 +81,29 @@ pub fn unauthorized() -> Response<Body> {
     )
 }
 
+/// A gated WebSocket or write started by another preview (see `edge`).
+pub fn forbidden_origin() -> Response<Body> {
+    page(
+        StatusCode::FORBIDDEN,
+        "Blocked",
+        "This preview does not accept requests started by another preview.",
+        None,
+    )
+}
+
+pub fn gateway_timeout() -> Response<Body> {
+    page(StatusCode::GATEWAY_TIMEOUT, "App did not respond", "The app accepted the request but did not answer in time.", None)
+}
+
+pub fn busy() -> Response<Body> {
+    page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Too many open requests",
+        "This preview has too many requests in progress. This page retries every few seconds.",
+        Some(5),
+    )
+}
+
 pub fn ended() -> Response<Body> {
     page(StatusCode::GONE, "Preview ended", "This preview has been stopped or has expired.", None)
 }

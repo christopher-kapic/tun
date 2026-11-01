@@ -529,7 +529,9 @@ async fn create_tunnel(
             access,
             client_id: caller.client_id().map(str::to_string),
         })
-        .await?;
+        .await?
+        // The client was deleted while this request was in flight.
+        .ok_or_else(ApiError::unauthorized)?;
     // A cached negative lookup for this id (e.g. a probe) must not hide the new tunnel.
     state.invalidate_tunnel(&row.id);
     let by = match &caller {
@@ -811,7 +813,10 @@ pub struct CreateClientRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateClientResponse {
     pub name: String,
-    /// Run this on the client machine. The code inside works once and expires at `expires_at`.
+    /// `<code>@<host>`: paste at the `cockpit-preview login` prompt on the
+    /// client machine. Works once, until `expires_at`.
+    pub login_code: String,
+    /// The same as a single command (puts the code in process listings and history).
     pub login_command: String,
     /// Unix seconds.
     pub expires_at: i64,
@@ -869,7 +874,7 @@ async fn create_client(
     ApiJson(req): ApiJson<CreateClientRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateClientResponse>)> {
     match clients::add(&state.db, &state.config, &req.name).await {
-        Ok(e) => Ok((StatusCode::CREATED, Json(CreateClientResponse { name: e.name, login_command: e.login_command, expires_at: e.expires_at }))),
+        Ok(e) => Ok((StatusCode::CREATED, Json(CreateClientResponse { name: e.name, login_code: e.login_code, login_command: e.login_command, expires_at: e.expires_at }))),
         Err(clients::AddError::Invalid(m)) => Err(ApiError::validation(m)),
         Err(clients::AddError::Taken) => {
             Err(ApiError::new(StatusCode::CONFLICT, "client_exists", "a client with this name exists; delete it first"))

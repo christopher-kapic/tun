@@ -147,6 +147,8 @@ pub async fn redeem(
 
 /// Largest login form body accepted.
 const LOGIN_BODY_LIMIT: usize = 8 * 1024;
+/// A login body must arrive within this long (slow bodies cannot pile up).
+const LOGIN_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// `POST /__login` on a password-mode tunnel: check the username and password,
 /// then mint a session exactly like a link redemption and send the visitor on
@@ -163,9 +165,10 @@ pub async fn login(
     if !state.access_limiter.check(peer) {
         return pages::rate_limited();
     }
-    let raw = match http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(_) => return pages::login(StatusCode::PAYLOAD_TOO_LARGE, "/", Some("The form was too large.")),
+    let raw = match tokio::time::timeout(LOGIN_BODY_DEADLINE, http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect()).await {
+        Ok(Ok(b)) => b.to_bytes(),
+        Ok(Err(_)) => return pages::login(StatusCode::PAYLOAD_TOO_LARGE, "/", Some("The form was too large.")),
+        Err(_) => return pages::login(StatusCode::REQUEST_TIMEOUT, "/", Some("The form took too long to arrive.")),
     };
     let (mut username, mut password, mut next) = (String::new(), String::new(), String::new());
     for (k, v) in url::form_urlencoded::parse(&raw) {
@@ -180,9 +183,15 @@ pub async fn login(
     let (Some(user), Some(hash)) = (tunnel.access.password_user.clone(), tunnel.access.password_hash.clone()) else {
         return pages::not_found();
     };
-    if !crate::password::verify(user, hash.clone(), username, password).await {
-        Metrics::inc(&state.metrics.access_failures);
-        return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password."));
+    match crate::password::verify(user, hash.clone(), username, password).await {
+        crate::password::Verdict::Match => {}
+        crate::password::Verdict::NoMatch => {
+            Metrics::inc(&state.metrics.access_failures);
+            return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password."));
+        }
+        crate::password::Verdict::Busy => {
+            return pages::login(StatusCode::SERVICE_UNAVAILABLE, &next, Some("The server is busy. Try again in a moment."));
+        }
     }
 
     let ttl = state.config.limits.default_session_ttl_s as i64;

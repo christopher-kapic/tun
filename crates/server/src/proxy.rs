@@ -35,6 +35,13 @@ use crate::util::{empty, header_str, incoming, text_response, Body, BoxError};
 
 /// Upper bound for opening a stream and reading the client's status byte.
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the origin may take to send response headers. Generous because
+/// dev servers can compile on the first request; bodies, SSE, and WebSockets
+/// are not limited by it.
+const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Requests and WebSockets in progress per tunnel connection; more get 503 so
+/// one tunnel (or a hung origin) cannot hold unbounded server and client state.
+const MAX_STREAMS_PER_TUNNEL: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WsKind {
@@ -91,7 +98,10 @@ pub async fn forward(
     *out.version_mut() = Version::HTTP_11;
     *out.headers_mut() = headers;
 
-    let guard = StreamGuard::new(state);
+    let Some(guard) = StreamGuard::admit(state, &live) else {
+        tracing::warn!(tunnel = %tunnel.id, "too many streams in progress");
+        return pages::busy();
+    };
     let stream = match tokio::time::timeout(STREAM_OPEN_TIMEOUT, open_stream(&live, port)).await {
         Ok(Opened::Ready(s)) => s,
         Ok(Opened::Refused) => return pages::app_not_running(port),
@@ -112,11 +122,15 @@ pub async fn forward(
         }
     });
 
-    let mut resp = match sender.send_request(out).await {
-        Ok(r) => r,
-        Err(e) => {
+    let mut resp = match tokio::time::timeout(RESPONSE_HEADER_TIMEOUT, sender.send_request(out)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             tracing::debug!(tunnel = %tunnel.id, port, error = %e, "origin request failed");
             return pages::bad_gateway();
+        }
+        Err(_) => {
+            tracing::debug!(tunnel = %tunnel.id, port, "origin sent no response headers in time");
+            return pages::gateway_timeout();
         }
     };
 
@@ -344,18 +358,25 @@ async fn open_stream(live: &LiveTunnel, port: u16) -> Opened {
 
 /// Keeps `live_streams` accurate for as long as a request, its response
 /// body, or a WebSocket splice is alive.
-struct StreamGuard(Arc<AppState>);
+/// One visitor request or WebSocket in progress, counted globally (metrics)
+/// and against the tunnel's [`MAX_STREAMS_PER_TUNNEL`].
+struct StreamGuard(Arc<AppState>, Arc<LiveTunnel>);
 
 impl StreamGuard {
-    fn new(state: &Arc<AppState>) -> Self {
+    fn admit(state: &Arc<AppState>, live: &Arc<LiveTunnel>) -> Option<Self> {
+        if live.streams.fetch_add(1, Ordering::AcqRel) >= MAX_STREAMS_PER_TUNNEL {
+            live.streams.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
         state.metrics.live_streams.fetch_add(1, Ordering::Relaxed);
-        Self(state.clone())
+        Some(Self(state.clone(), live.clone()))
     }
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         self.0.metrics.live_streams.fetch_sub(1, Ordering::Relaxed);
+        self.1.streams.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

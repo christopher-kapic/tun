@@ -47,7 +47,7 @@ Outside a sandbox, a machine can create its own tunnels instead of receiving a
 tunnel token:
 
 ```sh
-cockpit-preview login 'ctenr_…@tunnel.example.com'   # from `cockpit-tunnel-server client add <name>`
+cockpit-preview login                                  # paste the code from `cockpit-tunnel-server client add <name>`
 cockpit-preview share 3000 [5173 …]                    # link-only; prints a one-time link per port
 cockpit-preview share 3000 --public                    # anyone with the URL
 COCKPIT_SHARE_PASSWORD=… cockpit-preview share 3000 --password [--username bob]

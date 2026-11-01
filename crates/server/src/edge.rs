@@ -127,10 +127,21 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
         };
     }
 
-    let session_hash = match gate::authorize(state, id, &cookies.values).await {
-        Ok(s) => s,
-        Err(e) => return internal_error(id, e),
+    // Public tunnels have no gate, so presented cookies need no lookup.
+    let session_hash = if mode == AccessMode::Public {
+        None
+    } else {
+        match gate::authorize(state, id, &cookies.values).await {
+            Ok(s) => s,
+            Err(e) => return internal_error(id, e),
+        }
     };
+    // Every preview shares one site, so the browser attaches the gate cookie to
+    // requests that *other* previews start, and WebSockets get no CORS check.
+    if session_hash.is_some() && is_cross_preview_write(&req, &state.config.preview_zone, id) {
+        Metrics::inc(&state.metrics.gate_denials);
+        return pages::forbidden_origin();
+    }
     let reserved = is_under(&path, COCKPIT_PREFIX);
 
     let subject = match session_hash {
@@ -163,6 +174,42 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
     }
 
     forward_live(state, tunnel, port, req, cookies.forward, peer, Some(subject)).await
+}
+
+/// A WebSocket upgrade or state-changing request (not GET/HEAD/OPTIONS) whose
+/// `Origin` is another preview, the zone host itself, or opaque (`null`, e.g. a
+/// sandboxed iframe). Absent origins (non-browser clients), this tunnel's own
+/// hosts, and other sites (whose cookies are partitioned away) pass; reads stay
+/// protected by CORS as usual.
+fn is_cross_preview_write(req: &Request<Incoming>, zone: &str, tunnel_id: &str) -> bool {
+    let method = req.method();
+    let is_ws = req.headers().contains_key(header::UPGRADE) || *method == Method::CONNECT;
+    if !is_ws && matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    match header_str(req.headers().get(header::ORIGIN)) {
+        None => false,
+        Some(origin) => origin_is_foreign_preview(origin, zone, tunnel_id),
+    }
+}
+
+fn origin_is_foreign_preview(origin: &str, zone: &str, tunnel_id: &str) -> bool {
+    let origin = origin.trim().to_ascii_lowercase();
+    if origin == "null" {
+        return true;
+    }
+    let Some(rest) = origin.strip_prefix("https://").or_else(|| origin.strip_prefix("http://")) else {
+        return true;
+    };
+    let host = rest.split_once(':').map_or(rest, |(h, _)| h).trim_end_matches('.');
+    let zone = zone.to_ascii_lowercase();
+    if host == zone {
+        return true;
+    }
+    match host.strip_suffix(&format!(".{zone}")) {
+        Some(label) => headers::parse_label(label).is_none_or(|(_, id)| id != tunnel_id),
+        None => false,
+    }
 }
 
 /// The access mode of a live, unexpired tunnel.
@@ -263,6 +310,19 @@ fn internal_error(tunnel_id: &str, e: anyhow::Error) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_preview_origins() {
+        let z = "tunnel.example.com";
+        assert!(!origin_is_foreign_preview("https://3000-abcdefghij.tunnel.example.com", z, "abcdefghij"));
+        assert!(!origin_is_foreign_preview("https://5173-abcdefghij.tunnel.example.com:443", z, "abcdefghij"));
+        assert!(origin_is_foreign_preview("https://3000-zzzzzzzzzz.tunnel.example.com", z, "abcdefghij"));
+        assert!(origin_is_foreign_preview("https://tunnel.example.com", z, "abcdefghij"));
+        assert!(origin_is_foreign_preview("https://turn.tunnel.example.com", z, "abcdefghij"));
+        assert!(origin_is_foreign_preview("null", z, "abcdefghij"));
+        assert!(!origin_is_foreign_preview("https://app.client.com", z, "abcdefghij"));
+        assert!(!origin_is_foreign_preview("https://example.com", z, "abcdefghij"));
+    }
 
     #[test]
     fn reserved_prefixes() {

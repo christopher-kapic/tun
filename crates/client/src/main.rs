@@ -59,10 +59,11 @@ enum Cmd {
     },
     /// Stop the daemon and forget exposed ports (deletes a tunnel `share` created).
     Stop,
-    /// Log this machine in with the command `cockpit-tunnel-server client add` printed.
+    /// Log this machine in with the code `cockpit-tunnel-server client add` printed
+    /// (prompted for, so it stays out of process listings and shell history).
     Login {
-        /// `<code>@<host>`
-        code: String,
+        /// `<code>@<host>`; omit (or `-`) to be prompted / read it from stdin.
+        code: Option<String>,
     },
     /// Forget this machine's login.
     Logout,
@@ -148,7 +149,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Status { json } => commands::status(json).await,
         Cmd::Ice { format, fresh, exec: _, command } => commands::ice(format, fresh, command).await,
         Cmd::Stop => commands::stop().await,
-        Cmd::Login { code } => share::login(&code).await,
+        Cmd::Login { code } => share::login(code.as_deref()).await,
         Cmd::Logout => share::logout(),
         Cmd::Share { ports, public, password, link, username, ttl, label } => {
             share::share(ports, share::ShareAccess { public, password, link, username }, ttl, label).await

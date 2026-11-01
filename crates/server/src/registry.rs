@@ -1,7 +1,7 @@
 //! In-memory map of connected tunnels (one control connection per tunnel id).
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ pub struct LiveTunnel {
     /// Cancelled when the session must end; the session task cleans up.
     pub cancel: CancellationToken,
     pub connected_at: i64,
+    /// Visitor requests and WebSockets in progress on this connection.
+    pub streams: AtomicUsize,
 }
 
 impl LiveTunnel {

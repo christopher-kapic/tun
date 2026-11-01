@@ -12,6 +12,10 @@ pub const MAX_NAME_LEN: usize = 64;
 
 pub struct Enrollment {
     pub name: String,
+    /// `<code>@<host>`, pasted at the `cockpit-preview login` prompt.
+    pub login_code: String,
+    /// The same as one command; the code is then visible in process listings
+    /// and shell history, so the prompt is preferred.
     pub login_command: String,
     pub expires_at: i64,
 }
@@ -46,11 +50,15 @@ pub async fn add(db: &Db, cfg: &Config, name: &str) -> Result<Enrollment, AddErr
     let expires_at = now() + ENROLL_TTL_S;
     let id = format!("cl{}", tokens::random_tunnel_id());
     match db.create_client(id, name.to_string(), tokens::hash_token(&code), expires_at).await? {
-        Some(_) => Ok(Enrollment {
-            name: name.to_string(),
-            login_command: format!("cockpit-preview login '{code}@{}'", cfg.api_host),
-            expires_at,
-        }),
+        Some(_) => {
+            let login_code = format!("{code}@{}", cfg.api_host);
+            Ok(Enrollment {
+                name: name.to_string(),
+                login_command: format!("cockpit-preview login '{login_code}'"),
+                login_code,
+                expires_at,
+            })
+        }
         None => Err(AddError::Taken),
     }
 }

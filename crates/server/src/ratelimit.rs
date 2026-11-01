@@ -6,18 +6,27 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(60);
-/// Above this many tracked addresses, stale windows are dropped on the next check.
+/// Above this many tracked addresses, stale windows are dropped, at most once per `PRUNE_EVERY`.
 const PRUNE_ABOVE: usize = 10_000;
+const PRUNE_EVERY: Duration = Duration::from_secs(10);
+/// Hard cap on tracked addresses. When it is full of live windows, new
+/// addresses are refused (fail closed) rather than growing without bound.
+const MAX_TRACKED: usize = 100_000;
 
 pub struct RateLimiter {
     per_min: u32,
-    windows: Mutex<HashMap<IpAddr, (Instant, u32)>>,
+    windows: Mutex<Windows>,
+}
+
+struct Windows {
+    map: HashMap<IpAddr, (Instant, u32)>,
+    last_prune: Instant,
 }
 
 impl RateLimiter {
     /// `per_min == 0` disables limiting.
     pub fn new(per_min: u32) -> Self {
-        Self { per_min, windows: Mutex::new(HashMap::new()) }
+        Self { per_min, windows: Mutex::new(Windows { map: HashMap::new(), last_prune: Instant::now() }) }
     }
 
     /// Count one attempt from `ip`; `false` if it exceeds the per-minute budget.
@@ -27,11 +36,16 @@ impl RateLimiter {
         }
         let key = bucket(ip);
         let now = Instant::now();
-        let mut windows = self.windows.lock().expect("ratelimit lock");
-        if windows.len() > PRUNE_ABOVE {
-            windows.retain(|_, (start, _)| now.duration_since(*start) < WINDOW);
+        let mut guard = self.windows.lock().expect("ratelimit lock");
+        let w = &mut *guard;
+        if w.map.len() > PRUNE_ABOVE && now.duration_since(w.last_prune) >= PRUNE_EVERY {
+            w.map.retain(|_, (start, _)| now.duration_since(*start) < WINDOW);
+            w.last_prune = now;
         }
-        let entry = windows.entry(key).or_insert((now, 0));
+        if w.map.len() >= MAX_TRACKED && !w.map.contains_key(&key) {
+            return false;
+        }
+        let entry = w.map.entry(key).or_insert((now, 0));
         if now.duration_since(entry.0) >= WINDOW {
             *entry = (now, 0);
         }

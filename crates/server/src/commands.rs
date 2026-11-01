@@ -175,8 +175,11 @@ pub async fn client_add(config_path: &Path, name: &str) -> anyhow::Result<()> {
     restore_ownership(config_path, &cfg)?;
     match result {
         Ok(e) => {
-            println!("Run this on {name} within {} minutes (it works once):\n", crate::clients::ENROLL_TTL_S / 60);
-            println!("  {}\n", e.login_command);
+            println!(
+                "On {name}, run `cockpit-preview login` and paste this when asked (works once, within {} minutes):\n",
+                crate::clients::ENROLL_TTL_S / 60
+            );
+            println!("  {}\n", e.login_code);
             Ok(())
         }
         Err(crate::clients::AddError::Invalid(m)) => anyhow::bail!(m),

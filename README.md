@@ -110,10 +110,10 @@ password}`; access links work in every mode. Previews may be framed by the sites
 
 ### Logged-in machines
 
-`cockpit-tunnel-server client add laptop` prints a one-time (15 min) command:
+`cockpit-tunnel-server client add laptop` prints a one-time (15 min) login code:
 
 ```sh
-cockpit-preview login 'ctenr_…@tunnel.example.com'   # on the laptop
+cockpit-preview login                                 # on the laptop; paste ctenr_…@tunnel.example.com
 cockpit-preview share 3000                            # prints a one-time link
 cockpit-preview share 5173 --public                   # same tunnel, now public
 cockpit-preview link --reusable                       # another link

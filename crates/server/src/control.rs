@@ -37,6 +37,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_secs(60);
 const CTRL_QUEUE: usize = 64;
 const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+/// A control message that cannot be written this long ends the session.
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Matches the plan's 512 KiB outer frame cap; the bridge writes far smaller messages.
 const MAX_WS_FRAME: usize = 512 * 1024;
 
@@ -236,6 +238,7 @@ async fn control_loop(
         ctrl_tx: ctrl_tx.clone(),
         cancel: cancel.clone(),
         connected_at: now(),
+        streams: Default::default(),
     });
 
     // Writer: the only task that writes to the control stream. A Close is the
@@ -253,7 +256,14 @@ async fn control_loop(
                     _ = cancel.cancelled() => break,
                 };
                 let is_close = matches!(msg, ServerMsg::Close { .. });
-                if write_json_line(&mut wr, &msg).await.is_err() || is_close {
+                // A client that stops reading must not keep the writer (and so
+                // the session teardown) blocked; a Close still gets its chance.
+                let written = tokio::select! {
+                    r = write_json_line(&mut wr, &msg) => r.is_ok(),
+                    _ = cancel.cancelled(), if !is_close => false,
+                    _ = tokio::time::sleep(CONTROL_WRITE_TIMEOUT) => false,
+                };
+                if !written || is_close {
                     break;
                 }
             }
@@ -330,7 +340,11 @@ async fn control_loop(
                 let Some(msg) = msg else { break };
                 let reply = handle_msg(state, tunnel, &live, msg);
                 if let Some(reply) = reply {
-                    if ctrl_tx.send(reply).await.is_err() {
+                    let sent = tokio::select! {
+                        r = ctrl_tx.send(reply) => r.is_ok(),
+                        _ = cancel.cancelled() => false,
+                    };
+                    if !sent {
                         break;
                     }
                 }
@@ -341,7 +355,10 @@ async fn control_loop(
     state.registry.remove_if(&tunnel.id, live.conn_id);
     cancel.cancel();
     reader_task.abort();
-    let _ = writer.await;
+    let mut writer = writer;
+    if tokio::time::timeout(TEARDOWN_GRACE, &mut writer).await.is_err() {
+        writer.abort();
+    }
     tracing::info!(tunnel = %tunnel.id, conn = live.conn_id, "tunnel disconnected");
     Ok(())
 }

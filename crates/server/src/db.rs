@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS gate_grant_links (
     session_hash TEXT NOT NULL,
     tunnel_id    TEXT NOT NULL,
     link_id      TEXT NOT NULL REFERENCES access_links(id) ON DELETE CASCADE,
+    -- When the access this link gave runs out (NULL in older databases: the grant's).
+    expires_at   INTEGER,
     PRIMARY KEY (session_hash, tunnel_id, link_id),
     FOREIGN KEY (session_hash, tunnel_id) REFERENCES gate_grants(session_hash, tunnel_id) ON DELETE CASCADE
 );
@@ -70,6 +72,7 @@ CREATE INDEX IF NOT EXISTS gate_grant_links_link ON gate_grant_links(link_id);
 CREATE TABLE IF NOT EXISTS gate_grant_logins (
     session_hash TEXT NOT NULL,
     tunnel_id    TEXT NOT NULL,
+    expires_at   INTEGER,
     PRIMARY KEY (session_hash, tunnel_id),
     FOREIGN KEY (session_hash, tunnel_id) REFERENCES gate_grants(session_hash, tunnel_id) ON DELETE CASCADE
 );
@@ -91,8 +94,19 @@ CREATE TABLE IF NOT EXISTS client_enrollments (
 );
 "#;
 
-/// Columns added after the first release, as `(column, definition)`.
+/// Columns added after the first release, as `(table, column, definition)`.
 /// `CREATE TABLE IF NOT EXISTS` never alters an existing table.
+const COLUMNS_ADDED: &[(&str, &str, &str)] = &[
+    ("gate_grant_links", "expires_at", "INTEGER"),
+    ("gate_grant_logins", "expires_at", "INTEGER"),
+];
+
+/// Indexes that depend on added columns, created after migration.
+const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS tunnels_expires_at ON tunnels(expires_at);
+CREATE INDEX IF NOT EXISTS tunnels_client ON tunnels(client_id, expires_at);
+";
+
 const TUNNEL_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("access_mode", "TEXT NOT NULL DEFAULT 'link'"),
     ("password_user", "TEXT"),
@@ -322,14 +336,18 @@ impl Db {
         .await
     }
 
-    pub async fn create_tunnel(&self, t: NewTunnel) -> anyhow::Result<TunnelRow> {
+    /// `None` if `t.client_id` names a client that no longer exists (deleted
+    /// after the request authenticated): checked in the same statement, so a
+    /// concurrent `delete_client` cannot leave a live orphan.
+    pub async fn create_tunnel(&self, t: NewTunnel) -> anyhow::Result<Option<TunnelRow>> {
         self.call(move |c| {
             let created = now();
             let metadata = t.metadata.as_ref().map(|m| m.to_string());
-            c.execute(
+            let inserted = c.execute(
                 "INSERT INTO tunnels (id, token_hash, label, metadata, max_ports, host_header, inject_ice, created_at, expires_at,
                                       access_mode, password_user, password_hash, client_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 WHERE ?13 IS NULL OR EXISTS (SELECT 1 FROM clients WHERE id = ?13)",
                 params![
                     t.id,
                     t.token_hash,
@@ -346,7 +364,10 @@ impl Db {
                     t.client_id,
                 ],
             )?;
-            Ok(TunnelRow {
+            if inserted == 0 {
+                return Ok(None);
+            }
+            Ok(Some(TunnelRow {
                 id: t.id,
                 label: t.label,
                 metadata: t.metadata,
@@ -358,7 +379,7 @@ impl Db {
                 last_seen_at: None,
                 access: t.access,
                 client_id: t.client_id,
-            })
+            }))
         })
         .await
     }
@@ -580,8 +601,8 @@ impl Db {
             let (session_id, session_hash) =
                 mint_session(&tx, &tunnel_id, &presented_session_hashes, t, t + session_ttl_s)?;
             tx.execute(
-                "INSERT OR IGNORE INTO gate_grant_links (session_hash, tunnel_id, link_id) VALUES (?1, ?2, ?3)",
-                params![session_hash, tunnel_id, link_id],
+                "INSERT OR IGNORE INTO gate_grant_links (session_hash, tunnel_id, link_id, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                params![session_hash, tunnel_id, link_id, t + session_ttl_s],
             )?;
             let expires_at = finish_session(&tx, &session_hash)?;
             tx.commit()?;
@@ -620,8 +641,8 @@ impl Db {
             let (session_id, session_hash) =
                 mint_session(&tx, &tunnel_id, &presented_session_hashes, t, t + session_ttl_s)?;
             tx.execute(
-                "INSERT OR IGNORE INTO gate_grant_logins (session_hash, tunnel_id) VALUES (?1, ?2)",
-                params![session_hash, tunnel_id],
+                "INSERT OR IGNORE INTO gate_grant_logins (session_hash, tunnel_id, expires_at) VALUES (?1, ?2, ?3)",
+                params![session_hash, tunnel_id, t + session_ttl_s],
             )?;
             let expires_at = finish_session(&tx, &session_hash)?;
             tx.commit()?;
@@ -872,13 +893,17 @@ const TUNNEL_SELECT: &str = "SELECT id, label, metadata, max_ports, host_header,
 
 /// Add columns that older databases lack.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
-    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('tunnels')")?;
-    let have: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-    for (column, definition) in TUNNEL_COLUMNS_ADDED {
+    let columns = TUNNEL_COLUMNS_ADDED.iter().map(|(c, d)| ("tunnels", *c, *d)).chain(COLUMNS_ADDED.iter().copied());
+    for (table, column, definition) in columns {
+        let have: Vec<String> = conn
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
         if !have.iter().any(|c| c == column) {
-            conn.execute_batch(&format!("ALTER TABLE tunnels ADD COLUMN {column} {definition}"))?;
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
         }
     }
+    conn.execute_batch(INDEXES)?;
     Ok(())
 }
 
@@ -911,15 +936,15 @@ fn mint_session(
         // Provenance follows the copy so revoking the original link (or
         // changing the password) also revokes the carried-over grant.
         let mut copy_links = tx.prepare(
-            "INSERT OR IGNORE INTO gate_grant_links (session_hash, tunnel_id, link_id)
-             SELECT ?1, l.tunnel_id, l.link_id FROM gate_grant_links l
+            "INSERT OR IGNORE INTO gate_grant_links (session_hash, tunnel_id, link_id, expires_at)
+             SELECT ?1, l.tunnel_id, l.link_id, l.expires_at FROM gate_grant_links l
              JOIN gate_grants g ON g.session_hash = l.session_hash AND g.tunnel_id = l.tunnel_id
              JOIN gate_sessions s ON s.id_hash = l.session_hash
              WHERE l.session_hash = ?2 AND s.expires_at > ?3 AND g.expires_at > ?3",
         )?;
         let mut copy_logins = tx.prepare(
-            "INSERT OR IGNORE INTO gate_grant_logins (session_hash, tunnel_id)
-             SELECT ?1, l.tunnel_id FROM gate_grant_logins l
+            "INSERT OR IGNORE INTO gate_grant_logins (session_hash, tunnel_id, expires_at)
+             SELECT ?1, l.tunnel_id, l.expires_at FROM gate_grant_logins l
              JOIN gate_grants g ON g.session_hash = l.session_hash AND g.tunnel_id = l.tunnel_id
              JOIN gate_sessions s ON s.id_hash = l.session_hash
              WHERE l.session_hash = ?2 AND s.expires_at > ?3 AND g.expires_at > ?3",
@@ -955,16 +980,28 @@ fn finish_session(tx: &rusqlite::Transaction<'_>, session_hash: &str) -> anyhow:
     )?)
 }
 
-/// Drop grants on `tunnel_id` that only a password login vouches for (a grant
-/// that an access link also vouches for stays), then sessions left empty.
+/// End what password logins granted on `tunnel_id`. A grant that a still-live
+/// access link also vouches for stays, but only until that link's own
+/// expiry (a longer login must not outlive the password); the rest go, then
+/// sessions left empty.
 fn revoke_login_grants(tx: &rusqlite::Transaction<'_>, tunnel_id: &str) -> anyhow::Result<()> {
+    let t = now();
+    let has_login = "EXISTS (SELECT 1 FROM gate_grant_logins l
+                     WHERE l.session_hash = gate_grants.session_hash AND l.tunnel_id = ?1)";
+    let live_link = "FROM gate_grant_links k
+                     WHERE k.session_hash = gate_grants.session_hash AND k.tunnel_id = ?1
+                       AND (k.expires_at IS NULL OR k.expires_at > ?2)";
     tx.execute(
-        "DELETE FROM gate_grants WHERE tunnel_id = ?1
-           AND EXISTS (SELECT 1 FROM gate_grant_logins l
-                       WHERE l.session_hash = gate_grants.session_hash AND l.tunnel_id = ?1)
-           AND NOT EXISTS (SELECT 1 FROM gate_grant_links k
-                           WHERE k.session_hash = gate_grants.session_hash AND k.tunnel_id = ?1)",
-        params![tunnel_id],
+        &format!("DELETE FROM gate_grants WHERE tunnel_id = ?1 AND {has_login} AND NOT EXISTS (SELECT 1 {live_link})"),
+        params![tunnel_id, t],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE gate_grants SET expires_at = MIN(expires_at,
+               (SELECT MAX(COALESCE(k.expires_at, gate_grants.expires_at)) {live_link}))
+             WHERE tunnel_id = ?1 AND {has_login}"
+        ),
+        params![tunnel_id, t],
     )?;
     tx.execute("DELETE FROM gate_grant_logins WHERE tunnel_id = ?1", params![tunnel_id])?;
     tx.execute("DELETE FROM gate_sessions WHERE id_hash NOT IN (SELECT session_hash FROM gate_grants)", [])?;
@@ -1131,6 +1168,93 @@ mod tests {
         assert_eq!(db.expired_tunnel_ids().await.unwrap(), vec!["own1aaaaaa".to_string()]);
         assert!(db.delete_client("laptop".into()).await.unwrap().is_none());
 
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[tokio::test]
+    async fn password_change_caps_merged_grant_at_link_expiry() {
+        let (db, path) = temp_db();
+        let id = "t2aaaaaaaa".to_string();
+        db.create_tunnel(NewTunnel {
+            id: id.clone(),
+            token_hash: "tok2".into(),
+            label: None,
+            metadata: None,
+            max_ports: 8,
+            host_header: HostHeaderMode::Rewrite,
+            inject_ice: false,
+            expires_at: now() + 86_400,
+            access: password_access("h1"),
+            client_id: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        db.create_access_link(NewAccessLink {
+            id: "short".into(),
+            tunnel_id: id.clone(),
+            token_hash: "shortlink".into(),
+            single_use: false,
+            label: None,
+            session_ttl_s: 60,
+            expires_at: now() + 600,
+        })
+        .await
+        .unwrap();
+        let s_link = granted(Some(db.redeem_access_link(id.clone(), "shortlink".into(), vec![]).await.unwrap()));
+        let merged = granted(
+            db.login_grant(id.clone(), "h1".into(), 7200, vec![crate::tokens::hash_token(&s_link)]).await.unwrap(),
+        );
+        let hash = crate::tokens::hash_token(&merged);
+        let before = db.session_grants(vec![hash.clone()]).await.unwrap()[&hash][0].1;
+        assert!(before > now() + 3600, "merged grant carries the login's expiry");
+
+        db.update_tunnel(id.clone(), TunnelPatch { access: Some(password_access("h2")), ..Default::default() })
+            .await
+            .unwrap();
+        let after = db.session_grants(vec![hash.clone()]).await.unwrap()[&hash][0].1;
+        assert!(after <= now() + 60, "capped at the link's own expiry, got {}", after - now());
+
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_for_deleted_client_is_not_created() {
+        let (db, path) = temp_db();
+        let t = |id: &str, client: &str| NewTunnel {
+            id: id.into(),
+            token_hash: format!("h-{id}"),
+            label: None,
+            metadata: None,
+            max_ports: 8,
+            host_header: HostHeaderMode::Rewrite,
+            inject_ice: false,
+            expires_at: now() + 600,
+            access: Access::default(),
+            client_id: Some(client.into()),
+        };
+        assert!(db.create_tunnel(t("gone1aaaaa", "no-such-client")).await.unwrap().is_none());
+        db.create_client("cx".into(), "x".into(), "c".into(), now() + 60).await.unwrap();
+        assert!(db.create_tunnel(t("live1aaaaa", "cx")).await.unwrap().is_some());
+        db.delete_client("x".into()).await.unwrap();
+        assert!(db.create_tunnel(t("late1aaaaa", "cx")).await.unwrap().is_none());
+        let indexes: i64 = db
+            .call(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('tunnels_expires_at', 'tunnels_client')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(indexes, 2);
         drop(db);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

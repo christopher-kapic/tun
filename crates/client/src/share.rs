@@ -43,8 +43,12 @@ pub fn forget_shared(paths: &Paths) {
     let _ = std::fs::remove_file(shared_path(paths));
 }
 
-pub async fn login(arg: &str) -> anyhow::Result<i32> {
-    let (code, host) = parse_login_arg(arg)?;
+pub async fn login(arg: Option<&str>) -> anyhow::Result<i32> {
+    let arg = match arg.filter(|a| *a != "-") {
+        Some(a) => a.to_string(),
+        None => read_secret_line("Login code (from `cockpit-tunnel-server client add`): ")?,
+    };
+    let (code, host) = parse_login_arg(&arg)?;
     let login = enroll(&code, &host).await?;
     login.save()?;
     println!("Logged in to {} as {}.", login.api, login.name);
@@ -95,17 +99,30 @@ fn read_password() -> anyhow::Result<String> {
     if !std::io::stdin().is_terminal() {
         bail!("set {ENV_SHARE_PASSWORD} (no terminal to prompt for the password)");
     }
-    eprint!("Password for visitors (8+ characters): ");
-    std::io::stderr().flush()?;
-    let echo_off = std::process::Command::new("stty").arg("-echo").status().is_ok_and(|s| s.success());
+    read_secret_line("Password for visitors (8+ characters): ")
+}
+
+/// One line from stdin: prompted without echo on a terminal, read as-is from a pipe.
+fn read_secret_line(prompt: &str) -> anyhow::Result<String> {
+    let tty = std::io::stdin().is_terminal();
+    let mut echo_off = false;
+    if tty {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+        echo_off = std::process::Command::new("stty").arg("-echo").status().is_ok_and(|s| s.success());
+    }
     let mut line = String::new();
     let read = std::io::stdin().lock().read_line(&mut line);
     if echo_off {
         let _ = std::process::Command::new("stty").arg("echo").status();
+        eprintln!();
     }
-    eprintln!();
     read?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    let line = line.trim().to_string();
+    if line.is_empty() {
+        bail!("nothing entered");
+    }
+    Ok(line)
 }
 
 fn hostname() -> String {
