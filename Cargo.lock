@@ -355,6 +355,7 @@ dependencies = [
 name = "cockpit-tunnel-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "serde",
  "serde_json",

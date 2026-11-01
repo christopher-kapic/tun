@@ -12,7 +12,7 @@ use cockpit_tunnel_protocol::{
 };
 use futures_util::StreamExt;
 use rand::Rng;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -147,9 +147,7 @@ async fn establish(
         Ok(Ok((ws, _response))) => ws,
     };
 
-    let (duplex, pump) = ws_bridge::bridge(ws, PING_INTERVAL);
-    let _pump = AbortOnDrop(pump);
-    let session = Session::new_client(duplex, yamux_config());
+    let session = Session::new_client(ws_bridge::ws_io(ws, PING_INTERVAL), yamux_config());
     let mut control = session.control();
     let mut driver = AbortOnDrop(tokio::spawn(drive_session(daemon.clone(), session)));
 
@@ -232,7 +230,10 @@ fn close_end(reason: CloseReason) -> End {
 
 /// Own the Yamux session: polling it drives all streams. Every inbound stream
 /// is a server-opened data stream.
-async fn drive_session(daemon: Arc<Daemon>, session: Session<DuplexStream>) {
+/// The tunnel transport: Yamux over the server WebSocket.
+type WsTransport = ws_bridge::WsIo<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn drive_session(daemon: Arc<Daemon>, session: Session<WsTransport>) {
     let mut session = Box::pin(session);
     while let Some(next) = session.next().await {
         match next {
