@@ -88,7 +88,11 @@ pub fn not_found() / unauthorized() / ended() / offline() / app_not_running(port
 pub struct RateLimiter; impl RateLimiter { pub fn new(per_min: u32) -> Self; pub fn check(&self, ip: IpAddr) -> bool; }
 ```
 
-Edge order: label → tunnel lifecycle (404/410) → `/__access/*` → gate (with the
+Zone host (`<preview_zone>`): `/__access/{port}-{id}/{token}` and `/__login`
+(`gatehost.rs`). Sign-in never runs on a preview origin.
+
+Edge order: label → `/__access/*` and `/__login` (redirect to the zone host) →
+tunnel lifecycle (404/410) → gate (with the
 same-tunnel CORS preflight exception) → `/__cockpit/*` → declared port → proxy.
 
 ## TLS / ACME / DNS (`tls.rs`, `sni.rs`, `acme.rs`, `dns/*`)
