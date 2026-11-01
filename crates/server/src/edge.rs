@@ -1,8 +1,9 @@
 //! Visitor-facing edge for `*.<preview_zone>`.
 //!
-//! Order: label → `/__access/*` → tunnel lifecycle → `/__login` → gate (with
-//! the CORS preflight exception; skipped for public tunnels) → `/__cockpit/*`
-//! → live port → proxy. Reserved paths are never forwarded, and the origin is
+//! Order: label → `/__access/*` and `/__login` (redirected to the zone host,
+//! see `gatehost`) → tunnel lifecycle → gate (with the CORS preflight
+//! exception; skipped for public tunnels; pages on password tunnels go to the
+//! zone-host login) → `/__cockpit/*` → live port → proxy. Reserved paths are never forwarded, and the origin is
 //! never contacted for a request that fails the gate.
 
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use hyper::body::Incoming;
 
 use crate::db::{AccessMode, TunnelLookup, TunnelRow};
 use crate::gate;
+use crate::gatehost;
 use crate::headers;
 use crate::ice;
 use crate::metrics::Metrics;
@@ -75,26 +77,27 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
     let path = req.uri().path().to_string();
     let cookies = gate::split_cookies(req.headers());
 
-    // Before the lifecycle check: a link for an unknown, deleted, or expired
-    // tunnel gets the same generic 401 as any other bad link (redemption
-    // checks the tunnel itself).
+    // Links and the login form live on the zone host (see `gatehost`); old
+    // preview-host forms are sent there before anything else is checked.
     if is_under(&path, ACCESS_PREFIX) {
         let token = path.strip_prefix("/__access/").unwrap_or_default();
         let method_ok = *req.method() == Method::GET || *req.method() == Method::HEAD;
         if !method_ok || token.is_empty() || token.contains('/') {
             return pages::not_found();
         }
-        let resp = gate::redeem(state, peer.ip(), id, token, &cookies.values).await;
-        if resp.status() != StatusCode::UNAUTHORIZED {
-            return resp;
+        return pages::redirect(&gatehost::access_url(&state.config.preview_zone, id, Some(port), token));
+    }
+    if path == LOGIN_PATH {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            return pages::not_found();
         }
-        // A used or expired link still leads somewhere useful when the tunnel
-        // has another way in. Unknown and ended tunnels keep the generic 401.
-        return match live_access_mode(state, id).await {
-            Some(AccessMode::Password) => pages::login(StatusCode::UNAUTHORIZED, "/", None),
-            Some(AccessMode::Public) => redirect_root(),
-            _ => resp,
-        };
+        let next = req
+            .uri()
+            .query()
+            .and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "next"))
+            .map(|(_, v)| gate::safe_next(&v))
+            .unwrap_or_else(|| "/".to_string());
+        return pages::redirect(&gatehost::login_url(&state.config.preview_zone, label, &next));
     }
 
     let lookup = match state.tunnel(id).await {
@@ -108,25 +111,6 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
     };
 
     let mode = tunnel.access.mode;
-    if path == LOGIN_PATH {
-        if mode != AccessMode::Password {
-            return pages::not_found();
-        }
-        return match *req.method() {
-            Method::GET | Method::HEAD => {
-                let next = req
-                    .uri()
-                    .query()
-                    .and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "next"))
-                    .map(|(_, v)| gate::safe_next(&v))
-                    .unwrap_or_else(|| "/".to_string());
-                pages::login(StatusCode::OK, &next, None)
-            }
-            Method::POST => gate::login(state, peer.ip(), tunnel, req.into_body(), &cookies.values).await,
-            _ => pages::not_found(),
-        };
-    }
-
     // Public tunnels have no gate, so presented cookies need no lookup.
     let session_hash = if mode == AccessMode::Public {
         None
@@ -158,7 +142,7 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
             }
             Metrics::inc(&state.metrics.gate_denials);
             if let Some(next) = login_next {
-                return pages::login(StatusCode::UNAUTHORIZED, &next, None);
+                return pages::redirect(&gatehost::login_url(&state.config.preview_zone, label, &next));
             }
             return pages::unauthorized();
         }
@@ -210,24 +194,6 @@ fn origin_is_foreign_preview(origin: &str, zone: &str, tunnel_id: &str) -> bool 
         Some(label) => headers::parse_label(label).is_none_or(|(_, id)| id != tunnel_id),
         None => false,
     }
-}
-
-/// The access mode of a live, unexpired tunnel.
-async fn live_access_mode(state: &Arc<AppState>, id: &str) -> Option<AccessMode> {
-    match &*state.tunnel(id).await.ok()? {
-        TunnelLookup::Live(t) if !t.is_expired() => Some(t.access.mode),
-        _ => None,
-    }
-}
-
-fn redirect_root() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(header::LOCATION, "/")
-        .header(header::CACHE_CONTROL, "no-store")
-        .header(header::REFERRER_POLICY, "no-referrer")
-        .body(crate::util::empty())
-        .expect("valid response")
 }
 
 /// A browser loading a page (top level or in an iframe), as opposed to a

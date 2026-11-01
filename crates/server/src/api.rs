@@ -381,12 +381,21 @@ pub struct CreateAccessLinkRequest {
     /// Gate session lifetime (default 12h), capped by the tunnel's expiry.
     #[serde(default)]
     pub session_ttl_s: Option<u64>,
+    /// Port whose preview the link opens. Default: the lowest connected port
+    /// at mint time, else the lowest connected port when the link is opened.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AccessLinkResponse {
     pub id: String,
-    /// `/__access/ctacc_…`, valid on any `{port}-{id}` host of the tunnel.
+    /// The link to hand out: `https://<zone>/__access/{port}-{id}/ctacc_…`.
+    /// It signs the visitor in on the zone host (which no preview controls)
+    /// and redirects to the preview.
+    pub url: String,
+    /// Legacy: `/__access/ctacc_…` on any `{port}-{id}` host of the tunnel,
+    /// which redirects to the zone host. Prefer `url`.
     pub url_path: String,
     pub expires_at: i64,
 }
@@ -695,6 +704,10 @@ async fn create_access_link(
     }
     .min(remaining);
     validate_label(req.label.as_deref())?;
+    if req.port == Some(0) {
+        return Err(ApiError::validation("port must be 1..=65535"));
+    }
+    let port = req.port.or_else(|| state.registry.get(&tunnel.id).and_then(|l| l.ports().first().copied()));
 
     let link_id = tokens::random_link_id();
     let token = tokens::random_token(ACCESS_TOKEN_PREFIX);
@@ -716,7 +729,12 @@ async fn create_access_link(
 
     Ok((
         StatusCode::CREATED,
-        Json(AccessLinkResponse { id: link_id, url_path: format!("/__access/{token}"), expires_at }),
+        Json(AccessLinkResponse {
+            id: link_id,
+            url: crate::gatehost::access_url(&state.config.preview_zone, &tunnel.id, port, &token),
+            url_path: format!("/__access/{token}"),
+            expires_at,
+        }),
     ))
 }
 

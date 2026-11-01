@@ -19,7 +19,7 @@ use tokio_rustls::TlsAcceptor;
 use crate::sni::{self, SniPeek};
 use crate::state::AppState;
 use crate::util::{empty, request_host, text_response, Body, BoxError};
-use crate::{api, control, edge, pages, tls};
+use crate::{api, control, edge, gatehost, pages, tls};
 
 const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,6 +31,8 @@ struct Hosts {
     api: String,
     tunnel: String,
     turn: String,
+    /// `<preview_zone>`: sign-in pages (see `gatehost`).
+    zone: String,
     /// `.<preview_zone>`
     zone_suffix: String,
 }
@@ -42,6 +44,7 @@ impl Hosts {
             api: cfg.api_host.to_ascii_lowercase(),
             tunnel: cfg.tunnel_host.to_ascii_lowercase(),
             turn: cfg.turn_host.to_ascii_lowercase(),
+            zone: cfg.preview_zone.to_ascii_lowercase(),
             zone_suffix: format!(".{}", cfg.preview_zone.to_ascii_lowercase()),
         }
     }
@@ -51,7 +54,7 @@ impl Hosts {
     }
 
     fn is_ours(&self, host: &str) -> bool {
-        host == self.api || host == self.tunnel || self.preview_label(host).is_some()
+        host == self.api || host == self.tunnel || host == self.zone || self.preview_label(host).is_some()
     }
 }
 
@@ -137,6 +140,9 @@ async fn route(state: Arc<AppState>, hosts: &Hosts, peer: SocketAddr, req: Reque
     };
     if host == hosts.tunnel && req.uri().path() == CONNECT_PATH {
         return control::handle_connect(state, req).await;
+    }
+    if host == hosts.zone && gatehost::handles(req.uri().path()) {
+        return gatehost::handle(state, peer, req).await;
     }
     if host == hosts.api {
         let mut req = req;

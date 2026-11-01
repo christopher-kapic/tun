@@ -69,6 +69,9 @@ struct Inner {
 pub struct Daemon {
     pub paths: Paths,
     pub ice_file: PathBuf,
+    /// Bearer token for the local `/ice` endpoint (see `ice::serve_http`).
+    pub ice_token: String,
+    pub ice_port: u16,
     inner: Mutex<Inner>,
     conn: watch::Sender<ConnState>,
     /// Signalled when the token or server changes: drop the connection now.
@@ -81,10 +84,12 @@ pub fn lock_poisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Daemon {
-    fn new(paths: Paths, ice_file: PathBuf, persisted: Persisted) -> Self {
+    fn new(paths: Paths, ice_file: PathBuf, ice_token: String, ice_port: u16, persisted: Persisted) -> Self {
         Self {
             paths,
             ice_file,
+            ice_token,
+            ice_port,
             inner: Mutex::new(Inner {
                 persisted,
                 accepted: BTreeSet::new(),
@@ -404,6 +409,8 @@ impl Daemon {
             Request::Ice { fresh } => self.ice(fresh).await.map(|ice| Response::Ice {
                 ice,
                 ice_file: self.ice_file.display().to_string(),
+                ice_url: Some(format!("http://127.0.0.1:{}/ice", self.ice_port)),
+                ice_token: Some(self.ice_token.clone()),
             }),
         };
         result.unwrap_or_else(|e| Response::Error { message: format!("{e:#}") })
@@ -455,13 +462,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     let ice_file = paths::ice_file(&paths.dir);
     let ice_port = paths::ice_port();
+    let ice_token = ice::load_or_create_token(&paths.dir).context("ICE endpoint token")?;
     info!(
         server = %persisted.server,
         ports = ?persisted.ports,
         ice_file = %ice_file.display(),
         "daemon starting"
     );
-    let daemon = Arc::new(Daemon::new(paths, ice_file, persisted));
+    let daemon = Arc::new(Daemon::new(paths, ice_file, ice_token, ice_port, persisted));
     tokio::spawn(accept_ipc(daemon.clone(), listener));
     tokio::spawn(ice::serve_http(daemon.clone(), ice_port));
     tokio::spawn(exit_on_signal(daemon.clone()));

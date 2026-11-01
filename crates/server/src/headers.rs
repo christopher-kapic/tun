@@ -249,7 +249,7 @@ fn allows_any_parent(frame_ancestors: &[String]) -> bool {
 }
 
 /// `'self'` plus the configured parents (or just `*`).
-fn frame_sources(frame_ancestors: &[String]) -> Vec<String> {
+pub fn frame_sources(frame_ancestors: &[String]) -> Vec<String> {
     if allows_any_parent(frame_ancestors) {
         return vec!["*".to_string()];
     }

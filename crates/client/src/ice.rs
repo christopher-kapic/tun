@@ -12,6 +12,50 @@ use tracing::{debug, info, warn};
 use crate::daemon::Daemon;
 
 const MAX_REQUEST_HEAD: usize = 8 * 1024;
+/// Kept in the 0700 state directory so the token survives daemon restarts
+/// (agents keep a `COCKPIT_ICE_TOKEN` they were given).
+const TOKEN_FILE: &str = "ice-token";
+const TOKEN_PREFIX: &str = "ctice_";
+
+/// The `/ice` bearer token: read from `<state dir>/ice-token`, or created (0600).
+pub fn load_or_create_token(state_dir: &std::path::Path) -> anyhow::Result<String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = state_dir.join(TOKEN_FILE);
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim();
+        if t.starts_with(TOKEN_PREFIX) && t.len() > 32 {
+            return Ok(t.to_string());
+        }
+    }
+    let bytes: [u8; 32] = rand::random();
+    let token = format!("{TOKEN_PREFIX}{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let tmp = state_dir.join(format!("{TOKEN_FILE}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    f.write_all(token.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(token)
+}
+
+/// Constant-time comparison of the presented bearer token.
+fn token_matches(head: &str, expected: &str) -> bool {
+    let presented = head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        let value = value.trim();
+        let (scheme, token) = value.split_once(' ')?;
+        scheme.eq_ignore_ascii_case("bearer").then(|| token.trim().to_string())
+    });
+    let Some(presented) = presented else {
+        return false;
+    };
+    let (a, b) = (presented.as_bytes(), expected.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn unix_now() -> u64 {
@@ -54,8 +98,10 @@ pub fn format_env(vars: &[(&'static str, String)]) -> String {
     vars.iter().map(|(k, v)| format!("export {k}={}\n", shell_quote(v))).collect()
 }
 
-/// Serve the current ICE config at `http://127.0.0.1:<port>/ice`. A taken port
-/// only disables this endpoint; the ICE file still works.
+/// Serve the current ICE config at `http://127.0.0.1:<port>/ice` to callers
+/// presenting `Authorization: Bearer $COCKPIT_ICE_TOKEN` (loopback is shared
+/// with every local user). A taken port only disables this endpoint; the ICE
+/// file still works.
 pub async fn serve_http(daemon: Arc<Daemon>, port: u16) {
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
         Ok(l) => l,
@@ -104,6 +150,8 @@ async fn answer(daemon: &Daemon, mut sock: TcpStream, port: u16) -> std::io::Res
         // DNS rebinding guard: a web page must not read credentials via a
         // hostname it controls that resolves to 127.0.0.1.
         ("403 Forbidden", r#"{"error":"forbidden"}"#.to_string())
+    } else if method == "GET" && path == "/ice" && !token_matches(&head, &daemon.ice_token) {
+        ("401 Unauthorized", r#"{"error":"send Authorization: Bearer $COCKPIT_ICE_TOKEN (from `cockpit-preview ice --format env`)"}"#.to_string())
     } else if method == "GET" && path == "/ice" {
         match daemon.current_ice() {
             Some(ice) => ("200 OK", serde_json::to_string(&ice).unwrap_or_default()),
@@ -170,6 +218,24 @@ mod tests {
         );
         assert_eq!(get("TURN_USERNAME").as_deref(), Some("1:ab:sbx"));
         assert_eq!(get("ICE_EXPIRES_AT").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn bearer_token_is_required() {
+        let t = "ctice_0123456789abcdef0123456789abcdef";
+        assert!(token_matches(&format!("GET /ice HTTP/1.1\r\nAuthorization: Bearer {t}\r\n\r\n"), t));
+        assert!(token_matches(&format!("GET /ice HTTP/1.1\r\nauthorization: bearer  {t}\r\n\r\n"), t));
+        assert!(!token_matches("GET /ice HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", t));
+        assert!(!token_matches("GET /ice HTTP/1.1\r\nAuthorization: Bearer ctice_wrong\r\n\r\n", t));
+    }
+
+    #[test]
+    fn token_persists() {
+        let dir = std::env::temp_dir().join(format!("cp-ice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = load_or_create_token(&dir).unwrap();
+        assert_eq!(load_or_create_token(&dir).unwrap(), a);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

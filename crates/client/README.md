@@ -69,7 +69,7 @@ port. `expose` also uses the logged-in server when `COCKPIT_TUNNEL_SERVER` is un
 | `COCKPIT_TUNNEL_TOKEN` | Tunnel token (`cttun_…`). Pass by environment, never argv. |
 | `COCKPIT_TUNNEL_SERVER` | Tunnel server, e.g. `wss://tunnel.example.com` (`https://` and bare hosts are accepted). Defaults to `COCKPIT_TUNNEL_DEFAULT_SERVER` baked in at build time. |
 | `COCKPIT_ICE_FILE` | ICE file the daemon keeps fresh. Default `/run/cockpit-preview/ice.json` if writable, else `<state dir>/ice.json`. |
-| `COCKPIT_ICE_PORT` | Port of `http://127.0.0.1:<port>/ice` (default `47801`). |
+| `COCKPIT_ICE_PORT` | Port of `http://127.0.0.1:<port>/ice` (default `47801`). Requests need `Authorization: Bearer $COCKPIT_ICE_TOKEN`. |
 | `RUST_LOG` | Log filter (daemon default `info`, commands `warn`). |
 
 State lives in `$XDG_RUNTIME_DIR/cockpit-preview/` (else
@@ -78,8 +78,10 @@ holds the token), `daemon.log`.
 
 `ice --format env` prints `export K='v'` lines for `TURN_URLS`
 (comma-separated `turn:`/`turns:` URLs), `TURN_USERNAME`, `TURN_CREDENTIAL`,
-`ICE_SERVERS_JSON` (JSON array), `ICE_EXPIRES_AT` (unix seconds), and
-`COCKPIT_ICE_FILE`.
+`ICE_SERVERS_JSON` (JSON array), `ICE_EXPIRES_AT` (unix seconds),
+`COCKPIT_ICE_FILE`, `COCKPIT_ICE_URL`, and `COCKPIT_ICE_TOKEN` (the bearer
+token `/ice` requires; it lives in `<state dir>/ice-token` and survives daemon
+restarts).
 
 ## Exit codes
 
@@ -101,8 +103,9 @@ a different token is supplied; a replaced one is restarted only by an explicit
 1. `POST /v1/tunnels` with the admin token (or reuse this sandbox's live tunnel).
 2. Run in the sandbox: `COCKPIT_TUNNEL_TOKEN=cttun_… cockpit-preview expose <port>`.
 3. Poll `GET /v1/tunnels/{id}` (or `cockpit-preview status --json`) until the port is connected.
-4. Export into the agent shell: `COCKPIT_ICE_FILE`, `COCKPIT_ICE_URL=http://127.0.0.1:47801/ice`,
-   `COCKPIT_PREVIEW_HOST_TEMPLATE`, and optionally `COCKPIT_ICE_SERVERS` (snapshot from `ice --format json`).
+4. Export into the agent shell: `COCKPIT_ICE_FILE`, `COCKPIT_ICE_URL`, `COCKPIT_ICE_TOKEN`
+   (all three from `cockpit-preview ice --format env`), `COCKPIT_PREVIEW_HOST_TEMPLATE`, and
+   optionally `COCKPIT_ICE_SERVERS` (snapshot from `ice --format json`).
 5. On "stop preview": `DELETE /v1/tunnels/{id}`; the daemon exits and `status --json` reports `revoked`.
 
 Server-side WebRTC peers (SFU, aiortc, Pion, voice agents) need TURN over TLS on
@@ -117,7 +120,7 @@ eval "$(cockpit-preview ice --format env)"; npm run dev
 (`eval "$(…)" npm run dev` on one line does not work: `eval` joins its
 arguments into one string.) Values loaded at process start expire with the
 credential TTL (24h); long-running peers should re-read `$COCKPIT_ICE_FILE` or
-`GET http://127.0.0.1:47801/ice`. Browser code needs nothing: the edge injects
+`GET $COCKPIT_ICE_URL` with `Authorization: Bearer $COCKPIT_ICE_TOKEN`. Browser code needs nothing: the edge injects
 ICE config into preview pages.
 
 **Never write TURN credentials, ICE config, or preview hostnames into source

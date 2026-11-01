@@ -101,13 +101,17 @@ pub async fn status(json: bool) -> anyhow::Result<i32> {
 }
 
 pub async fn ice(format: IceFormat, fresh: bool, exec: Vec<String>) -> anyhow::Result<i32> {
-    let (config, ice_file) = match ask(Request::Ice { fresh }, false, false).await? {
-        Answer::Response(Response::Ice { ice, ice_file }) => (ice, ice_file),
+    let (config, ice_file, endpoint) = match ask(Request::Ice { fresh }, false, false).await? {
+        Answer::Response(Response::Ice { ice, ice_file, ice_url, ice_token }) => (ice, ice_file, ice_url.zip(ice_token)),
         Answer::Response(_) => bail!("unexpected daemon response"),
         Answer::Exit(code) => return Ok(code),
         Answer::Stopped => bail!("cockpit-preview is not running; run `cockpit-preview expose <PORT>` first"),
     };
-    let vars = ice::env_vars(&config, &ice_file);
+    let mut vars = ice::env_vars(&config, &ice_file);
+    if let Some((url, token)) = endpoint {
+        vars.push(("COCKPIT_ICE_URL", url));
+        vars.push(("COCKPIT_ICE_TOKEN", token));
+    }
     if let Some((program, args)) = exec.split_first() {
         // Replaces this process, so the command keeps the caller's stdio and exit status.
         let err = std::process::Command::new(program).args(args).envs(vars).exec();

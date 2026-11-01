@@ -24,7 +24,7 @@ crates/server/             cockpit-tunnel-server (VPS)
   src/commands.rs          non-interactive subcommands; `serve` wires everything together
   src/listener.rs          :443 (SNI peek → coturn passthrough, else TLS + hyper auto) and :80 redirect
   src/edge.rs proxy.rs     visitor edge: lifecycle, gate, reserved paths, forwarding, WebSockets
-  src/gate.rs              gate cookie and /__access/{token}
+  src/gate.rs gatehost.rs  gate cookie; sign-in (links, password) on the zone host
   src/headers.rs           hop-by-hop, Origin/Location/Set-Cookie/CSP/iframe rewrites
   src/inject.rs            streaming ICE <script> injection + CSP hash
   src/pages.rs ratelimit.rs

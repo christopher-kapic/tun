@@ -1,4 +1,6 @@
-//! Visitor gate: the parent-domain session cookie and `/__access/{token}`.
+//! Visitor gate: the parent-domain session cookie, access-link redemption,
+//! and password login. Redemption and login run on the zone host (see
+//! `gatehost`), never on a preview origin a preview app could control.
 
 use std::net::IpAddr;
 
@@ -12,6 +14,8 @@ use crate::pages;
 use crate::state::AppState;
 use crate::tokens::{hash_token, now};
 use crate::util::{empty, text_response, Body};
+
+
 
 /// Distinct plausible gate-cookie values considered per request. Preview JS
 /// can toss extra same-named cookies (longer paths are sent first), so this
@@ -97,15 +101,16 @@ pub async fn authorize(state: &AppState, tunnel_id: &str, values: &[String]) -> 
     Ok(loaded.into_iter().find(|(_, g)| grants_tunnel(g.as_slice())).map(|(hash, _)| hash))
 }
 
-/// `/__access/{token}`: validate, mint a fresh session carrying the new grant
-/// and those of any valid presented session, set the cookie, and redirect to
-/// `/` so the token never appears in a later URL.
+/// Access-link redemption: validate, mint a fresh session carrying the new
+/// grant and those of any valid presented session, set the cookie, and
+/// redirect to `location` so the token never appears in a later URL.
 pub async fn redeem(
     state: &AppState,
     peer: IpAddr,
     tunnel_id: &str,
     token: &str,
     cookie_values: &[String],
+    location: &str,
 ) -> Response<Body> {
     if !state.access_limiter.check(peer) {
         return pages::rate_limited();
@@ -137,7 +142,7 @@ pub async fn redeem(
 
     Response::builder()
         .status(StatusCode::FOUND)
-        .header(header::LOCATION, "/")
+        .header(header::LOCATION, location)
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::SET_COOKIE, gate_cookie(&state.config.preview_zone, &session_id, expires_at - now()))
@@ -150,47 +155,72 @@ const LOGIN_BODY_LIMIT: usize = 8 * 1024;
 /// A login body must arrive within this long (slow bodies cannot pile up).
 const LOGIN_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// `POST /__login` on a password-mode tunnel: check the username and password,
-/// then mint a session exactly like a link redemption and send the visitor on
-/// to `next`. Failures re-render the form; attempts share the access-link rate limit.
+/// The fields of a submitted login form.
+pub struct LoginForm {
+    pub to: String,
+    pub username: String,
+    pub password: String,
+    pub next: String,
+}
+
+/// Read a login form body, bounded in size and time. `Err` is the page to show.
+pub async fn read_login_form(body: hyper::body::Incoming) -> Result<LoginForm, (StatusCode, &'static str)> {
+    use http_body_util::BodyExt;
+    let raw = match tokio::time::timeout(LOGIN_BODY_DEADLINE, http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect()).await {
+        Ok(Ok(b)) => b.to_bytes(),
+        Ok(Err(_)) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "The form was too large.")),
+        Err(_) => return Err((StatusCode::REQUEST_TIMEOUT, "The form took too long to arrive.")),
+    };
+    let mut form = LoginForm { to: String::new(), username: String::new(), password: String::new(), next: String::new() };
+    for (k, v) in url::form_urlencoded::parse(&raw) {
+        match &*k {
+            "to" => form.to = v.into_owned(),
+            "username" => form.username = v.into_owned(),
+            "password" => form.password = v.into_owned(),
+            "next" => form.next = v.into_owned(),
+            _ => {}
+        }
+    }
+    form.next = safe_next(&form.next);
+    Ok(form)
+}
+
+/// How a password login ended.
+pub enum LoginOutcome {
+    /// Signed in: the `Set-Cookie` value to send.
+    Granted(String),
+    /// Show the form again with this status and message.
+    Retry(StatusCode, &'static str),
+    RateLimited,
+    /// The tunnel is not (or no longer) password-protected.
+    NotPassword,
+    Internal,
+}
+
+/// Check a submitted username and password against a password-mode tunnel
+/// and mint a session exactly like a link redemption. Attempts share the
+/// access-link rate limit.
 pub async fn login(
     state: &AppState,
     peer: IpAddr,
     tunnel: &crate::db::TunnelRow,
-    body: hyper::body::Incoming,
+    form: LoginForm,
     cookie_values: &[String],
-) -> Response<Body> {
-    use http_body_util::BodyExt;
-
+) -> LoginOutcome {
     if !state.access_limiter.check(peer) {
-        return pages::rate_limited();
+        return LoginOutcome::RateLimited;
     }
-    let raw = match tokio::time::timeout(LOGIN_BODY_DEADLINE, http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect()).await {
-        Ok(Ok(b)) => b.to_bytes(),
-        Ok(Err(_)) => return pages::login(StatusCode::PAYLOAD_TOO_LARGE, "/", Some("The form was too large.")),
-        Err(_) => return pages::login(StatusCode::REQUEST_TIMEOUT, "/", Some("The form took too long to arrive.")),
-    };
-    let (mut username, mut password, mut next) = (String::new(), String::new(), String::new());
-    for (k, v) in url::form_urlencoded::parse(&raw) {
-        match &*k {
-            "username" => username = v.into_owned(),
-            "password" => password = v.into_owned(),
-            "next" => next = v.into_owned(),
-            _ => {}
-        }
-    }
-    let next = safe_next(&next);
     let (Some(user), Some(hash)) = (tunnel.access.password_user.clone(), tunnel.access.password_hash.clone()) else {
-        return pages::not_found();
+        return LoginOutcome::NotPassword;
     };
-    match crate::password::verify(user, hash.clone(), username, password).await {
+    match crate::password::verify(user, hash.clone(), form.username, form.password).await {
         crate::password::Verdict::Match => {}
         crate::password::Verdict::NoMatch => {
             Metrics::inc(&state.metrics.access_failures);
-            return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password."));
+            return LoginOutcome::Retry(StatusCode::UNAUTHORIZED, "Wrong username or password.");
         }
         crate::password::Verdict::Busy => {
-            return pages::login(StatusCode::SERVICE_UNAVAILABLE, &next, Some("The server is busy. Try again in a moment."));
+            return LoginOutcome::Retry(StatusCode::SERVICE_UNAVAILABLE, "The server is busy. Try again in a moment.");
         }
     }
 
@@ -199,21 +229,15 @@ pub async fn login(
     let (session_id, expires_at) = match granted {
         Ok(Some(Redemption::Granted { session_id, expires_at })) => (session_id, expires_at),
         // The password or mode changed while we were checking.
-        Ok(_) => return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password.")),
+        Ok(_) => return LoginOutcome::Retry(StatusCode::UNAUTHORIZED, "Wrong username or password."),
         Err(e) => {
             tracing::error!(tunnel = %tunnel.id, error = %e, "password login failed");
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
+            return LoginOutcome::Internal;
         }
     };
     Metrics::inc(&state.metrics.access_redemptions);
     tracing::info!(tunnel = %tunnel.id, "password login");
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, next)
-        .header(header::CACHE_CONTROL, "no-store")
-        .header(header::SET_COOKIE, gate_cookie(&state.config.preview_zone, &session_id, expires_at - now()))
-        .body(empty())
-        .expect("valid response")
+    LoginOutcome::Granted(gate_cookie(&state.config.preview_zone, &session_id, expires_at - now()))
 }
 
 /// Same-host path to continue to after signing in; anything else becomes `/`.

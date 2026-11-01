@@ -8,6 +8,7 @@ mod db;
 mod dns;
 mod edge;
 mod gate;
+mod gatehost;
 mod headers;
 mod ice;
 mod inject;

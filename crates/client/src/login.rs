@@ -179,15 +179,15 @@ impl<'a> Api<'a> {
         decode::<Value>(resp, "changing access").await.map(|_| ())
     }
 
-    /// Path (`/__access/…`) of a new access link.
-    pub async fn access_link(&self, id: &str, ttl_s: u64, single_use: bool) -> anyhow::Result<String> {
+    /// Full URL of a new access link that opens `port`'s preview.
+    pub async fn access_link(&self, id: &str, port: u16, ttl_s: u64, single_use: bool) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Link {
-            url_path: String,
+            url: String,
         }
-        let body = json!({ "ttl_s": ttl_s, "single_use": single_use });
+        let body = json!({ "ttl_s": ttl_s, "single_use": single_use, "port": port });
         let resp = self.req(reqwest::Method::POST, &format!("/v1/tunnels/{id}/access-links")).json(&body).send().await?;
-        decode::<Link>(resp, "creating access link").await.map(|l| l.url_path)
+        decode::<Link>(resp, "creating access link").await.map(|l| l.url)
     }
 
     pub async fn delete_tunnel(&self, id: &str) -> anyhow::Result<()> {

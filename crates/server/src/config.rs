@@ -254,7 +254,13 @@ impl Config {
 
     /// Every name on the single DNS-01 certificate.
     pub fn cert_names(&self) -> Vec<String> {
-        let mut names = vec![format!("*.{}", self.preview_zone), self.api_host.clone(), self.tunnel_host.clone()];
+        // The zone apex serves sign-in (`gatehost`); usually it is also the API host.
+        let mut names = vec![
+            format!("*.{}", self.preview_zone),
+            self.preview_zone.clone(),
+            self.api_host.clone(),
+            self.tunnel_host.clone(),
+        ];
         if self.webrtc.enabled {
             names.push(self.turn_host.clone());
         }

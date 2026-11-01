@@ -38,22 +38,41 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
-/// Login form for a password-protected preview. Posts to `/__login` on the
-/// same host, so it also works inside an iframe. `next` is where to go after
-/// signing in (already sanitized by the caller).
-pub fn login(status: StatusCode, next: &str, error: Option<&str>) -> Response<Body> {
+/// Where a login form sends the visitor, and who may frame it.
+pub struct LoginTarget<'a> {
+    /// Preview label (`{port}-{id}`) to sign in to.
+    pub to: &'a str,
+    /// Path on that preview to continue to (already sanitized).
+    pub next: &'a str,
+    /// `https://{to}.{zone}`: the form's redirect target, allowed by `form-action`.
+    pub preview_origin: &'a str,
+    /// `frame-ancestors` sources (see `headers::frame_sources`).
+    pub frame_sources: &'a [String],
+}
+
+/// Login form for a password-protected preview, served on the zone host
+/// (never on a preview origin, whose service workers the app controls).
+/// Posts to `/__login` on the same host and works inside an iframe.
+pub fn login(status: StatusCode, target: &LoginTarget<'_>, error: Option<&str>) -> Response<Body> {
     let error = error.map(|e| format!(r#"<p class="err" role="alert">{}</p>"#, escape(e))).unwrap_or_default();
     let html = format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Sign in</title>
 <style>body{{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;color:#1f1f1f;background:#fafafa}}main{{width:100%;max-width:20rem;padding:1.5rem;box-sizing:border-box}}h1{{margin:0 0 1rem;font-size:1.25rem}}label{{display:block;margin:.75rem 0 .25rem;font-size:.875rem;color:#5f5f5f}}input{{width:100%;box-sizing:border-box;padding:.5rem .625rem;font:inherit;border:1px solid #c8c8c8;border-radius:6px;background:#fff;color:inherit}}button{{margin-top:1rem;width:100%;padding:.55rem;font:inherit;font-weight:600;border:0;border-radius:6px;background:#1f1f1f;color:#fff;cursor:pointer}}.err{{margin:0 0 .5rem;color:#b3261e;font-size:.875rem}}@media (prefers-color-scheme:dark){{body{{color:#ececec;background:#161616}}label{{color:#a8a8a8}}input{{background:#232323;border-color:#3a3a3a}}button{{background:#ececec;color:#161616}}.err{{color:#f2b8b5}}}}</style></head>
 <body><main><h1>Sign in to view this preview</h1>{error}
-<form method="post" action="/__login"><input type="hidden" name="next" value="{next}">
+<form method="post" action="/__login"><input type="hidden" name="to" value="{to}"><input type="hidden" name="next" value="{next}">
 <label for="u">Username</label><input id="u" name="username" autocomplete="username" required autofocus>
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
 <button type="submit">Sign in</button></form></main></body></html>
 "#,
-        next = escape(next),
+        to = escape(target.to),
+        next = escape(target.next),
+    );
+    // `form-action` also governs the redirect after a successful POST.
+    let csp = format!(
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {}; frame-ancestors {}",
+        target.preview_origin,
+        target.frame_sources.join(" ")
     );
     Response::builder()
         .status(status)
@@ -62,9 +81,20 @@ pub fn login(status: StatusCode, next: &str, error: Option<&str>) -> Response<Bo
         .header(HeaderName::from_static("x-robots-tag"), "noindex")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
-        .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+        .header(header::CONTENT_SECURITY_POLICY, csp)
         .body(full(html))
         .expect("valid response")
+}
+
+/// A `302` to `location` that leaks nothing in `Referer`.
+pub fn redirect(location: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, location)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .body(crate::util::empty())
+        .unwrap_or_else(|_| not_found())
 }
 
 pub fn not_found() -> Response<Body> {
@@ -114,6 +144,16 @@ pub fn offline() -> Response<Body> {
         "Preview offline",
         "The preview is not connected right now. This page retries every few seconds.",
         Some(5),
+    )
+}
+
+/// A link was redeemed but the tunnel has no connected port to go to yet.
+pub fn offline_signed_in() -> Response<Body> {
+    page(
+        StatusCode::OK,
+        "Signed in",
+        "The preview is not connected yet. Open it from its preview address once it is running.",
+        None,
     )
 }
 

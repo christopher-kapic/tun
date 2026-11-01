@@ -194,8 +194,8 @@ pub async fn share(ports: Vec<u16>, access: ShareAccess, ttl_s: u64, label: Opti
                 username.as_deref().unwrap_or("?")
             ),
             _ => {
-                let path = api.access_link(&tunnel_id, LINK_TTL_S, true).await?;
-                println!("{port}  https://{host}{path}  (works once, within {} min){note}", LINK_TTL_S / 60);
+                let url = api.access_link(&tunnel_id, *port, LINK_TTL_S, true).await?;
+                println!("{port}  {url}  (works once, within {} min){note}", LINK_TTL_S / 60);
             }
         }
     }
@@ -245,9 +245,9 @@ pub async fn link(port: Option<u16>, reusable: bool, ttl_s: u64) -> anyhow::Resu
         None => bail!("no ports are shared"),
     };
     let api = Api::new(&login)?;
-    let path = api.access_link(&shared.tunnel_id, ttl_s, !reusable).await?;
+    let url = api.access_link(&shared.tunnel_id, port, ttl_s, !reusable).await?;
     let uses = if reusable { "any number of times" } else { "once" };
-    println!("https://{}{path}  (works {uses}, for {} min)", port_host(&status, port), ttl_s / 60);
+    println!("{url}  (works {uses}, for {} min)", ttl_s / 60);
     Ok(0)
 }
 

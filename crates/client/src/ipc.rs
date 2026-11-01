@@ -45,7 +45,15 @@ pub enum Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status { status: Status },
-    Ice { ice: IceConfig, ice_file: String },
+    Ice {
+        ice: IceConfig,
+        ice_file: String,
+        /// `http://127.0.0.1:<port>/ice` and the bearer token it requires.
+        #[serde(default)]
+        ice_url: Option<String>,
+        #[serde(default)]
+        ice_token: Option<String>,
+    },
     Error { message: String },
 }
 
