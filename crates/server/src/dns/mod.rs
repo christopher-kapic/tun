@@ -117,6 +117,31 @@ impl Provider {
     }
 }
 
+/// Zones the Cloudflare token can see.
+pub async fn cloudflare_zones(token: &str) -> anyhow::Result<Vec<String>> {
+    cloudflare::visible_zones(&http_client()?, token).await
+}
+
+/// The most specific zone that contains `host`.
+pub fn pick_zone(host: &str, zones: &[String]) -> Option<String> {
+    let host = normalize(host);
+    zones
+        .iter()
+        .map(|z| normalize(z))
+        .filter(|z| host == *z || host.ends_with(&format!(".{z}")))
+        .max_by_key(|z| z.len())
+}
+
+impl Provider {
+    /// Prove the credentials can write records for `host` by creating and
+    /// deleting a throwaway TXT record, before anything depends on it.
+    pub async fn check_write(&self, host: &str) -> anyhow::Result<()> {
+        let name = format!("_cockpit-setup-check.{}", normalize(host));
+        let rec = self.create_txt(&name, "cockpit-tunnel setup check").await?;
+        self.delete(&rec).await
+    }
+}
+
 fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -164,6 +189,20 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::pick_zone;
+
+    #[test]
+    fn picks_most_specific_zone() {
+        let zones = vec!["kapic.io".to_string(), "other.dev".to_string(), "sub.kapic.io".to_string()];
+        assert_eq!(pick_zone("tunnel.kapic.io", &zones).as_deref(), Some("kapic.io"));
+        assert_eq!(pick_zone("a.sub.kapic.io", &zones).as_deref(), Some("sub.kapic.io"));
+        assert_eq!(pick_zone("kapic.io.", &zones).as_deref(), Some("kapic.io"));
+        assert_eq!(pick_zone("notkapic.io", &zones), None);
+    }
 }
 
 #[derive(Deserialize)]

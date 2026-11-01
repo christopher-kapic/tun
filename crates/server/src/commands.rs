@@ -1,7 +1,6 @@
 //! Non-interactive subcommands: `serve`, `token rotate`, `status`, `backup`, `cert renew`.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -9,6 +8,7 @@ use cockpit_tunnel_protocol::{CloseReason, ADMIN_TOKEN_PREFIX};
 
 use crate::config::{Config, SERVICE_NAME, SERVICE_USER};
 use crate::db::Db;
+use crate::mode::{self, Mode};
 use crate::state::AppState;
 use crate::tls::{self, CertStatus};
 use crate::tokens;
@@ -68,19 +68,22 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 }
 
 pub async fn token_rotate(config_path: &Path) -> anyhow::Result<()> {
-    ensure_root("token rotate")?;
+    ensure_can_write(config_path, "token rotate")?;
+    let mode = install_mode(config_path);
     let mut cfg = Config::load(config_path)?;
     let token = tokens::random_token(ADMIN_TOKEN_PREFIX);
     cfg.admin_token_hash = tokens::hash_token(&token);
     cfg.save(config_path)?;
-    util::chown_recursive(config_path, SERVICE_USER)?;
+    if mode == Mode::System {
+        util::chown_recursive(config_path, SERVICE_USER)?;
+    }
 
     // The server reads the hash at startup; the old token stays valid until it restarts.
-    if systemctl(&["try-restart", SERVICE_NAME]) {
+    if mode.systemctl_ok(&["try-restart", SERVICE_NAME]) {
         println!("Restarted {SERVICE_NAME} (if it was running); the old token no longer works.");
     } else {
         eprintln!(
-            "warning: `systemctl try-restart {SERVICE_NAME}` failed; restart the service so the new token takes effect"
+            "warning: restarting {SERVICE_NAME} failed; restart the service so the new token takes effect"
         );
     }
 
@@ -101,9 +104,11 @@ pub async fn status(config_path: &Path) -> anyhow::Result<()> {
     println!("api:         https://{}", cfg.api_host);
     println!("tunnel:      wss://{}", cfg.tunnel_host);
     println!("previews:    *.{}", cfg.preview_zone);
-    println!("service:     {}", service_state(SERVICE_NAME));
+    let mode = install_mode(config_path);
+    let kind = if mode == Mode::System { "root install" } else { "rootless install" };
+    println!("service:     {} ({kind})", mode.service_state(SERVICE_NAME));
     if cfg.webrtc.enabled {
-        println!("coturn:      {} (turn host {})", service_state("coturn"), cfg.turn_host);
+        println!("coturn:      {} (turn host {})", Mode::System.service_state("coturn"), cfg.turn_host);
     } else {
         println!("webrtc:      disabled");
     }
@@ -121,7 +126,7 @@ pub async fn status(config_path: &Path) -> anyhow::Result<()> {
         let db = Db::open(&db_path)?;
         let (tunnels, tombstones, links, sessions) = db.counts().await?;
         drop(db);
-        restore_ownership(&cfg)?;
+        restore_ownership(config_path, &cfg)?;
         println!("database:    {}", db_path.display());
         println!("  tunnels {tunnels}, tombstones {tombstones}, access links {links}, gate sessions {sessions}");
     } else {
@@ -138,7 +143,7 @@ pub async fn backup(config_path: &Path, out: &Path) -> anyhow::Result<()> {
     let db = Db::open(&db_path)?;
     db.backup_to(out.to_path_buf()).await?;
     drop(db);
-    restore_ownership(&cfg)?;
+    restore_ownership(config_path, &cfg)?;
     // Holds token hashes and session ids; keep it private.
     crate::config::set_mode(out, 0o600)?;
     println!("Wrote {}", out.display());
@@ -146,7 +151,7 @@ pub async fn backup(config_path: &Path, out: &Path) -> anyhow::Result<()> {
 }
 
 pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()> {
-    ensure_root("cert renew")?;
+    ensure_can_write(config_path, "cert renew")?;
     let cfg = Config::load(config_path)?;
     let status = tls::cert_status(&cfg);
     if let (false, CertStatus::Valid { not_after }) = (force, status) {
@@ -155,57 +160,40 @@ pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()> {
     }
     println!("Issuing a certificate for {} ...", cfg.cert_names().join(", "));
     acme::issue(&cfg).await?;
-    util::chown_recursive(&cfg.data_dir, SERVICE_USER)?;
+    restore_ownership(config_path, &cfg)?;
     println!("Certificate written to {}.", cfg.cert_dir().display());
     println!("A running server loads it within a minute; no restart needed.");
     Ok(())
 }
 
-/// Commands that write root-managed files must run as root.
-fn ensure_root(what: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(is_root(), "`{what}` must run as root (try: sudo cockpit-tunnel-server {what})");
-    Ok(())
+/// The install a config belongs to: a config in `/etc` is a root install.
+fn install_mode(config_path: &Path) -> Mode {
+    if config_path.starts_with("/etc") {
+        Mode::System
+    } else {
+        Mode::User
+    }
 }
 
-fn is_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .stdin(Stdio::null())
-        .output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+/// Commands that write a root install's files must run as root.
+fn ensure_can_write(config_path: &Path, what: &str) -> anyhow::Result<()> {
+    if install_mode(config_path) == Mode::System {
+        anyhow::ensure!(
+            mode::uid() == 0,
+            "`{what}` changes a root install ({}); run it with sudo",
+            config_path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Opening SQLite as root can leave root-owned files (the db, `-wal`, `-shm`)
 /// that the service user cannot write; hand the data dir back.
-fn restore_ownership(cfg: &Config) -> anyhow::Result<()> {
-    if is_root() {
+fn restore_ownership(config_path: &Path, cfg: &Config) -> anyhow::Result<()> {
+    if install_mode(config_path) == Mode::System && mode::uid() == 0 {
         util::chown_recursive(&cfg.data_dir, SERVICE_USER)?;
     }
     Ok(())
-}
-
-fn systemctl(args: &[&str]) -> bool {
-    Command::new("systemctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// `systemctl is-active` prints the state even when it exits non-zero.
-fn service_state(unit: &str) -> String {
-    match Command::new("systemctl").args(["is-active", unit]).stdin(Stdio::null()).output() {
-        Ok(out) => {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.is_empty() {
-                "unknown".to_string()
-            } else {
-                s
-            }
-        }
-        Err(_) => "unknown (systemctl unavailable)".to_string(),
-    }
 }
 
 fn describe_time(unix: i64) -> String {

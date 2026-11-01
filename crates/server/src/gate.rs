@@ -147,7 +147,7 @@ pub async fn redeem(
 
 fn gate_cookie(zone: &str, value: &str, max_age: i64) -> String {
     format!(
-        "{GATE_COOKIE}={value}; Domain={zone}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={}",
+        "{GATE_COOKIE}={value}; Domain={zone}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={}",
         max_age.max(0)
     )
 }
@@ -188,7 +188,7 @@ mod tests {
         let c = gate_cookie("previews.example.com", "abc", 60);
         assert_eq!(
             c,
-            "__Secure-cockpit-gate=abc; Domain=previews.example.com; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=60"
+            "__Secure-cockpit-gate=abc; Domain=previews.example.com; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age=60"
         );
     }
 }

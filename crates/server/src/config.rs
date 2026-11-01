@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/cockpit-tunnel/config.toml";
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/cockpit-tunnel";
 pub const SERVICE_USER: &str = "cockpit-tunnel";
 pub const SERVICE_NAME: &str = "cockpit-tunnel";
@@ -14,15 +13,22 @@ pub const SERVICE_NAME: &str = "cockpit-tunnel";
 /// Contains secrets (TURN secret, DNS token); the admin token is stored only as a hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
-    /// Registrable/base domain, e.g. `example.com`.
+    /// Unused; kept so configs written by older setups still parse.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_domain: String,
     /// Wildcard preview zone, e.g. `previews.example.com`.
     pub preview_zone: String,
     pub api_host: String,
     pub tunnel_host: String,
     pub turn_host: String,
-    /// Allowed iframe parent, e.g. `https://app.example.com`.
+    /// Older single iframe parent; folded into `frame_ancestors` on load.
+    #[serde(default, skip_serializing)]
     pub dashboard_origin: String,
+    /// Sites allowed to show previews in an iframe: CSP `frame-ancestors` sources
+    /// (`https://app.example.com`, `https://*.example.com`), or `*` for any site.
+    /// The preview's own origin is always allowed.
+    #[serde(default)]
+    pub frame_ancestors: Vec<String>,
 
     #[serde(default = "default_https")]
     pub listen_https: SocketAddr,
@@ -207,7 +213,21 @@ fn default_tombstone_retention() -> u64 {
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Self = toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.normalize_frame_ancestors();
+        Ok(cfg)
+    }
+
+    /// Fold the old `dashboard_origin` into `frame_ancestors`; nothing set means any site.
+    pub fn normalize_frame_ancestors(&mut self) {
+        if self.frame_ancestors.is_empty() {
+            self.frame_ancestors = if self.dashboard_origin.is_empty() {
+                vec!["*".to_string()]
+            } else {
+                vec![self.dashboard_origin.clone()]
+            };
+        }
+        self.dashboard_origin.clear();
     }
 
     pub fn to_toml(&self) -> anyhow::Result<String> {

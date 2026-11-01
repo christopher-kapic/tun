@@ -62,8 +62,8 @@ pub fn ask_bool(question: &str, default: bool) -> anyhow::Result<bool> {
 pub fn ask_secret(question: &str, existing: Option<&str>) -> anyhow::Result<String> {
     let existing = existing.filter(|s| !s.is_empty());
     loop {
-        if existing.is_some() {
-            show(&format!("{question} [Enter keeps the current value]: "))?;
+        if let Some(current) = existing {
+            show(&format!("{question} [Enter keeps the current one, {}]: ", mask(current)))?;
         } else {
             show(&format!("{question}: "))?;
         }
@@ -81,6 +81,16 @@ pub fn ask_secret(question: &str, existing: Option<&str>) -> anyhow::Result<Stri
             return Ok(current.to_string());
         }
         eprintln!("  a value is required");
+    }
+}
+
+/// `…abcd`: enough to recognize a stored secret, not to use it.
+fn mask(secret: &str) -> String {
+    let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    if secret.chars().count() <= 8 {
+        "set".to_string()
+    } else {
+        format!("ending in {tail}")
     }
 }
 

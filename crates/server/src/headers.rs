@@ -79,7 +79,8 @@ fn public_to_local(url: &str, zone: &str, tunnel_id: &str) -> Option<String> {
 pub struct ResponseCtx<'a> {
     pub zone: &'a str,
     pub tunnel_id: &'a str,
-    pub dashboard_origin: &'a str,
+    /// Allowed iframe parents (`*` = any site); see `Config::frame_ancestors`.
+    pub frame_ancestors: &'a [String],
 }
 
 /// Rewrite origin response headers for the visitor. `script_hash` is the
@@ -96,7 +97,7 @@ pub fn rewrite_response(headers: &mut HeaderMap, ctx: &ResponseCtx<'_>, script_h
     }
 
     headers.remove(header::X_FRAME_OPTIONS);
-    rewrite_csp_headers(headers, ctx.dashboard_origin, script_hash);
+    rewrite_csp_headers(headers, ctx.frame_ancestors, script_hash);
 
     let corp = HeaderName::from_static("cross-origin-resource-policy");
     if header_str(headers.get(&corp)).is_some_and(|v| v.trim().eq_ignore_ascii_case("same-origin")) {
@@ -220,34 +221,72 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 
 /// Rewrite every enforced CSP header. `Content-Security-Policy-Report-Only`
 /// is left alone: it never blocks anything.
-fn rewrite_csp_headers(headers: &mut HeaderMap, dashboard_origin: &str, script_hash: Option<&str>) {
-    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
-        return;
+fn rewrite_csp_headers(headers: &mut HeaderMap, frame_ancestors: &[String], script_hash: Option<&str>) {
+    let mut app_sets_framing = false;
+    if headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        let values: Vec<HeaderValue> = headers.get_all(header::CONTENT_SECURITY_POLICY).iter().cloned().collect();
+        headers.remove(header::CONTENT_SECURITY_POLICY);
+        for v in values {
+            let rewritten = v.to_str().ok().and_then(|s| {
+                let (out, framing) = rewrite_csp(s, frame_ancestors, script_hash);
+                app_sets_framing |= framing;
+                HeaderValue::from_str(&out).ok()
+            });
+            headers.append(header::CONTENT_SECURITY_POLICY, rewritten.unwrap_or(v));
+        }
     }
-    let values: Vec<HeaderValue> = headers.get_all(header::CONTENT_SECURITY_POLICY).iter().cloned().collect();
-    headers.remove(header::CONTENT_SECURITY_POLICY);
-    for v in values {
-        let rewritten = v
-            .to_str()
-            .ok()
-            .and_then(|s| HeaderValue::from_str(&rewrite_csp_value(s, dashboard_origin, script_hash)).ok());
-        headers.append(header::CONTENT_SECURITY_POLICY, rewritten.unwrap_or(v));
+    // A restricted parent list is enforced even when the app says nothing about
+    // framing: a separate policy only adds this one restriction.
+    if !app_sets_framing && !allows_any_parent(frame_ancestors) {
+        if let Ok(v) = HeaderValue::from_str(&format!("frame-ancestors {}", frame_sources(frame_ancestors).join(" "))) {
+            headers.append(header::CONTENT_SECURITY_POLICY, v);
+        }
     }
+}
+
+fn allows_any_parent(frame_ancestors: &[String]) -> bool {
+    frame_ancestors.is_empty() || frame_ancestors.iter().any(|s| s == "*")
+}
+
+/// `'self'` plus the configured parents (or just `*`).
+fn frame_sources(frame_ancestors: &[String]) -> Vec<String> {
+    if allows_any_parent(frame_ancestors) {
+        return vec!["*".to_string()];
+    }
+    let mut out = vec!["'self'".to_string()];
+    for s in frame_ancestors {
+        if !has(&out, s) {
+            out.push(s.clone());
+        }
+    }
+    out
 }
 
 /// One header value may hold several comma-separated policies; each is
 /// enforced independently, so each is rewritten independently.
-pub fn rewrite_csp_value(value: &str, dashboard_origin: &str, script_hash: Option<&str>) -> String {
-    value
+#[cfg(test)]
+fn rewrite_csp_value(value: &str, frame_ancestors: &[String], script_hash: Option<&str>) -> String {
+    rewrite_csp(value, frame_ancestors, script_hash).0
+}
+
+/// Also reports whether any policy had a `frame-ancestors` directive.
+fn rewrite_csp(value: &str, frame_ancestors: &[String], script_hash: Option<&str>) -> (String, bool) {
+    let mut framing = false;
+    let out = value
         .split(',')
-        .map(|p| rewrite_policy(p.trim(), dashboard_origin, script_hash))
+        .map(|p| {
+            let (policy, f) = rewrite_policy(p.trim(), frame_ancestors, script_hash);
+            framing |= f;
+            policy
+        })
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    (out, framing)
 }
 
 type Directive = (String, Vec<String>);
 
-fn rewrite_policy(policy: &str, dashboard_origin: &str, script_hash: Option<&str>) -> String {
+fn rewrite_policy(policy: &str, frame_ancestors: &[String], script_hash: Option<&str>) -> (String, bool) {
     let mut dirs: Vec<Directive> = policy
         .split(';')
         .filter_map(|d| {
@@ -258,20 +297,25 @@ fn rewrite_policy(policy: &str, dashboard_origin: &str, script_hash: Option<&str
         .collect();
 
     let mut changed = false;
-    if let Some(i) = first(&dirs, "frame-ancestors") {
-        merge_frame_ancestors(&mut dirs[i].1, dashboard_origin);
+    let framing = first(&dirs, "frame-ancestors");
+    if let Some(i) = framing {
+        // The configured parents replace the app's own list: a dev server's
+        // `'self'`/`'none'` would otherwise block every harness iframe.
+        dirs[i].1 = frame_sources(frame_ancestors);
         changed = true;
     }
     if let Some(hash) = script_hash {
         changed |= add_script_hash(&mut dirs, hash);
     }
     if !changed {
-        return policy.to_string();
+        return (policy.to_string(), false);
     }
-    dirs.iter()
+    let out = dirs
+        .iter()
         .map(|(n, s)| if s.is_empty() { n.clone() } else { format!("{n} {}", s.join(" ")) })
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; ");
+    (out, framing.is_some())
 }
 
 /// Browsers honour only the first occurrence of a directive.
@@ -281,17 +325,6 @@ fn first(dirs: &[Directive], name: &str) -> Option<usize> {
 
 fn has(src: &[String], token: &str) -> bool {
     src.iter().any(|s| s.eq_ignore_ascii_case(token))
-}
-
-/// Allow the preview itself and the harness dashboard to frame the page.
-fn merge_frame_ancestors(src: &mut Vec<String>, dashboard_origin: &str) {
-    src.retain(|s| !s.eq_ignore_ascii_case("'none'"));
-    if !has(src, "'self'") {
-        src.insert(0, "'self'".to_string());
-    }
-    if !dashboard_origin.is_empty() && !has(src, dashboard_origin) {
-        src.push(dashboard_origin.to_string());
-    }
 }
 
 /// CSP3 "allows all inline behavior": `'unsafe-inline'` without any nonce,
@@ -347,11 +380,46 @@ fn add_script_hash(dirs: &mut Vec<Directive>, hash: &str) -> bool {
 mod tests {
     use super::*;
 
+    static APP_LIST: std::sync::LazyLock<Vec<String>> =
+        std::sync::LazyLock::new(|| vec!["https://app.example.com".to_string()]);
+    static ANY_LIST: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec!["*".to_string()]);
+
+    fn csp_after(app_csp: Option<&str>, parents: &[String]) -> Vec<String> {
+        let mut h = HeaderMap::new();
+        if let Some(v) = app_csp {
+            h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_str(v).unwrap());
+        }
+        rewrite_csp_headers(&mut h, parents, None);
+        h.get_all(header::CONTENT_SECURITY_POLICY).iter().map(|v| v.to_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn any_parent_replaces_app_framing_and_adds_nothing() {
+        assert_eq!(
+            csp_after(Some("default-src 'self'; frame-ancestors 'self'"), &ANY_LIST),
+            vec!["default-src 'self'; frame-ancestors *"]
+        );
+        assert!(csp_after(None, &ANY_LIST).is_empty());
+        assert!(csp_after(None, &[]).is_empty());
+    }
+
+    #[test]
+    fn restricted_parents_are_enforced_without_app_csp() {
+        assert_eq!(csp_after(None, &APP_LIST), vec!["frame-ancestors 'self' https://app.example.com"]);
+        // An app policy without framing keeps its own header; the restriction is a second policy.
+        assert_eq!(
+            csp_after(Some("script-src 'self'"), &APP_LIST),
+            vec!["script-src 'self'", "frame-ancestors 'self' https://app.example.com"]
+        );
+        // An app policy with framing is rewritten in place, not duplicated.
+        assert_eq!(csp_after(Some("frame-ancestors 'none'"), &APP_LIST), vec!["frame-ancestors 'self' https://app.example.com"]);
+    }
+
     const ZONE: &str = "previews.example.com";
     const ID: &str = "abcdefghij";
 
     fn ctx() -> ResponseCtx<'static> {
-        ResponseCtx { zone: ZONE, tunnel_id: ID, dashboard_origin: "https://app.example.com" }
+        ResponseCtx { zone: ZONE, tunnel_id: ID, frame_ancestors: &APP_LIST }
     }
 
     #[test]
@@ -428,29 +496,29 @@ mod tests {
 
     #[test]
     fn frame_ancestors_merge() {
-        let out = rewrite_csp_value("default-src 'self'; frame-ancestors 'none'", "https://app.example.com", None);
+        let out = rewrite_csp_value("default-src 'self'; frame-ancestors 'none'", &APP_LIST, None);
         assert_eq!(out, "default-src 'self'; frame-ancestors 'self' https://app.example.com");
     }
 
     #[test]
     fn script_hash_added() {
-        let out = rewrite_csp_value("script-src 'self'", "", Some("AAA="));
+        let out = rewrite_csp_value("script-src 'self'", &ANY_LIST, Some("AAA="));
         assert_eq!(out, "script-src 'self' 'sha256-AAA='");
-        let out = rewrite_csp_value("default-src 'self' 'none'", "", Some("AAA="));
+        let out = rewrite_csp_value("default-src 'self' 'none'", &ANY_LIST, Some("AAA="));
         assert_eq!(out, "default-src 'self' 'none'; script-src 'self' 'sha256-AAA='");
     }
 
     #[test]
     fn unsafe_inline_untouched() {
         let p = "script-src 'self' 'unsafe-inline'";
-        assert_eq!(rewrite_csp_value(p, "", Some("AAA=")), p);
-        let out = rewrite_csp_value("script-src 'unsafe-inline' 'nonce-xyz'", "", Some("AAA="));
+        assert_eq!(rewrite_csp_value(p, &ANY_LIST, Some("AAA=")), p);
+        let out = rewrite_csp_value("script-src 'unsafe-inline' 'nonce-xyz'", &ANY_LIST, Some("AAA="));
         assert_eq!(out, "script-src 'unsafe-inline' 'nonce-xyz' 'sha256-AAA='");
     }
 
     #[test]
     fn multiple_policies() {
-        let out = rewrite_csp_value("script-src 'self', img-src *", "", Some("AAA="));
+        let out = rewrite_csp_value("script-src 'self', img-src *", &ANY_LIST, Some("AAA="));
         assert_eq!(out, "script-src 'self' 'sha256-AAA=', img-src *");
     }
 }

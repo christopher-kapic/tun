@@ -12,6 +12,7 @@ mod ice;
 mod inject;
 mod listener;
 mod metrics;
+mod mode;
 mod pages;
 mod proxy;
 mod purge;
@@ -31,8 +32,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "cockpit-tunnel-server", version, about = "Preview relay for sandboxed apps")]
 struct Cli {
-    #[arg(long, global = true, default_value = config::DEFAULT_CONFIG_PATH)]
-    config: PathBuf,
+    /// Config file (default: /etc/cockpit-tunnel/config.toml as root,
+    /// ~/.config/cockpit-tunnel/config.toml otherwise).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -41,7 +44,7 @@ struct Cli {
 enum Cmd {
     /// Run the server (used by the systemd unit).
     Serve,
-    /// Interactive install/reconfigure wizard (run as root).
+    /// Install or reconfigure (as root: system install; as another user: rootless install).
     Setup(setup::SetupArgs),
     /// Admin token management.
     Token {
@@ -85,12 +88,16 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
+    let config = match cli.config {
+        Some(p) => p,
+        None => mode::Mode::current().config_path()?,
+    };
     match cli.cmd {
-        Cmd::Serve => commands::serve(&cli.config).await,
-        Cmd::Setup(args) => setup::run(&cli.config, args).await,
-        Cmd::Token { cmd: TokenCmd::Rotate } => commands::token_rotate(&cli.config).await,
-        Cmd::Status => commands::status(&cli.config).await,
-        Cmd::Backup { path } => commands::backup(&cli.config, &path).await,
-        Cmd::Cert { cmd: CertCmd::Renew { force } } => commands::cert_renew(&cli.config, force).await,
+        Cmd::Serve => commands::serve(&config).await,
+        Cmd::Setup(args) => setup::run(&config, args).await,
+        Cmd::Token { cmd: TokenCmd::Rotate } => commands::token_rotate(&config).await,
+        Cmd::Status => commands::status(&config).await,
+        Cmd::Backup { path } => commands::backup(&config, &path).await,
+        Cmd::Cert { cmd: CertCmd::Renew { force } } => commands::cert_renew(&config, force).await,
     }
 }

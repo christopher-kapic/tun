@@ -38,6 +38,32 @@ struct Zone {
 }
 
 #[derive(Deserialize)]
+struct ZoneName {
+    name: String,
+}
+
+/// Every zone `token` can see (an invalid token fails here with Cloudflare's message).
+pub async fn visible_zones(http: &reqwest::Client, token: &str) -> anyhow::Result<Vec<String>> {
+    let probe = Cloudflare::new(http.clone(), token.to_string(), String::new());
+    let mut names = Vec::new();
+    for page in 1..=20 {
+        let page = page.to_string();
+        let batch: Vec<ZoneName> = probe
+            .call(
+                probe.http.get(format!("{API}/zones")).query(&[("per_page", "50"), ("page", page.as_str())]),
+                "zone list",
+            )
+            .await?;
+        let done = batch.len() < 50;
+        names.extend(batch.into_iter().map(|z| z.name.to_ascii_lowercase()));
+        if done {
+            break;
+        }
+    }
+    Ok(names)
+}
+
+#[derive(Deserialize)]
 struct DnsRecord {
     id: String,
 }

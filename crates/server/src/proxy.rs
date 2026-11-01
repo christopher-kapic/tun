@@ -160,7 +160,7 @@ pub async fn forward(
         .filter(|_| injectable(&parts))
         .map(|subject| inject::script(&ice::mint(cfg, &tunnel.id, &subject, cfg.webrtc.browser_ttl_s), &cfg.turn_host));
     let hash = script.as_deref().map(inject::csp_hash);
-    let ctx = ResponseCtx { zone: &cfg.preview_zone, tunnel_id: &tunnel.id, dashboard_origin: &cfg.dashboard_origin };
+    let ctx = ResponseCtx { zone: &cfg.preview_zone, tunnel_id: &tunnel.id, frame_ancestors: &cfg.frame_ancestors };
     headers::rewrite_response(&mut parts.headers, &ctx, hash.as_deref());
 
     let counted = Counted { inner: incoming(body), bytes, outbound: true, _guard: Some(guard) }.boxed();
