@@ -11,7 +11,9 @@ use axum::response::{IntoResponse, Response as AxumResponse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
-use cockpit_tunnel_protocol::{CloseReason, IceServer, ACCESS_TOKEN_PREFIX, ADMIN_TOKEN_PREFIX, TUNNEL_TOKEN_PREFIX};
+use cockpit_tunnel_protocol::{
+    CloseReason, IceServer, ACCESS_TOKEN_PREFIX, ADMIN_TOKEN_PREFIX, CLIENT_TOKEN_PREFIX, ENROLL_CODE_PREFIX, TUNNEL_TOKEN_PREFIX,
+};
 use http::request::Parts;
 use http::{header, HeaderValue, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -22,7 +24,8 @@ use tower::ServiceExt;
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 
-use crate::db::{Access, AccessMode, DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow};
+use crate::clients;
+use crate::db::{Access, AccessMode, ClientRow, DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow};
 use crate::password;
 use crate::ice;
 use crate::state::AppState;
@@ -70,6 +73,9 @@ fn build_router() -> Router<Arc<AppState>> {
         .route("/v1/tunnels/{id}/access-links", post(create_access_link))
         .route("/v1/access-links/{id}", delete(delete_access_link))
         .route("/v1/tunnels/{id}/turn-credentials", post(turn_credentials))
+        .route("/v1/clients", post(create_client).get(list_clients))
+        .route("/v1/clients/enroll", post(enroll_client))
+        .route("/v1/clients/{name}", delete(delete_client))
         .fallback(fallback)
 }
 
@@ -100,7 +106,7 @@ impl ApiError {
     }
 
     fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid admin token")
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid token")
     }
 
     fn not_found(what: &str) -> Self {
@@ -146,18 +152,69 @@ type ApiResult<T> = Result<T, ApiError>;
 /// Proof that the request carried the admin token.
 pub struct Admin;
 
+/// Who is calling a tunnel endpoint: the admin token (every tunnel) or an
+/// enrolled client's token (only tunnels that client created).
+#[derive(Debug, Clone)]
+pub enum Caller {
+    Admin,
+    Client { id: String, name: String },
+}
+
+impl Caller {
+    fn client_id(&self) -> Option<&str> {
+        match self {
+            Self::Admin => None,
+            Self::Client { id, .. } => Some(id),
+        }
+    }
+
+    fn may_use(&self, row: &TunnelRow) -> bool {
+        match self {
+            Self::Admin => true,
+            Self::Client { id, .. } => row.client_id.as_deref() == Some(id.as_str()),
+        }
+    }
+}
+
+fn bearer(parts: &Parts) -> Option<&str> {
+    parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+}
+
+impl FromRequestParts<Arc<AppState>> for Caller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
+        let token = bearer(parts).ok_or_else(ApiError::unauthorized)?;
+        if token.starts_with(ADMIN_TOKEN_PREFIX) {
+            return if tokens::hashes_equal(&tokens::hash_token(token), &state.config.admin_token_hash) {
+                Ok(Self::Admin)
+            } else {
+                Err(ApiError::unauthorized())
+            };
+        }
+        if token.starts_with(CLIENT_TOKEN_PREFIX) && token.len() <= 256 {
+            if let Some((id, name)) = state.db.client_by_token_hash(tokens::hash_token(token)).await? {
+                return Ok(Self::Client { id, name });
+            }
+        }
+        Err(ApiError::unauthorized())
+    }
+}
+
+/// Peer address of the API request (set by the listener).
+#[derive(Debug, Clone, Copy)]
+pub struct PeerAddr(pub std::net::SocketAddr);
+
 impl FromRequestParts<Arc<AppState>> for Admin {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
-        let token = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|t| t.starts_with(ADMIN_TOKEN_PREFIX))
-            .ok_or_else(ApiError::unauthorized)?;
+        let token = bearer(parts).filter(|t| t.starts_with(ADMIN_TOKEN_PREFIX)).ok_or_else(ApiError::unauthorized)?;
         if tokens::hashes_equal(&tokens::hash_token(token), &state.config.admin_token_hash) {
             Ok(Admin)
         } else {
@@ -364,6 +421,10 @@ pub struct TurnCredentialsResponse {
         create_access_link,
         delete_access_link,
         turn_credentials,
+        create_client,
+        list_clients,
+        delete_client,
+        enroll_client,
     ),
     components(schemas(
         ErrorBody,
@@ -373,6 +434,12 @@ pub struct TurnCredentialsResponse {
         AccessRequest,
         AccessView,
         AccessMode,
+        CreateClientRequest,
+        CreateClientResponse,
+        ClientView,
+        ClientList,
+        EnrollRequest,
+        EnrollResponse,
         PatchTunnelRequest,
         PortView,
         TunnelView,
@@ -424,7 +491,7 @@ async fn fallback() -> ApiError {
 )]
 async fn create_tunnel(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     ApiJson(req): ApiJson<CreateTunnelRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateTunnelResponse>)> {
     let limits = &state.config.limits;
@@ -460,11 +527,16 @@ async fn create_tunnel(
             inject_ice: req.inject_ice.unwrap_or(true),
             expires_at: now() + req.ttl_s as i64,
             access,
+            client_id: caller.client_id().map(str::to_string),
         })
         .await?;
     // A cached negative lookup for this id (e.g. a probe) must not hide the new tunnel.
     state.invalidate_tunnel(&row.id);
-    tracing::info!(tunnel = %row.id, max_ports, access = mode.as_str(), expires_at = row.expires_at, "tunnel created");
+    let by = match &caller {
+        Caller::Admin => "admin",
+        Caller::Client { name, .. } => name.as_str(),
+    };
+    tracing::info!(tunnel = %row.id, by, max_ports, access = mode.as_str(), expires_at = row.expires_at, "tunnel created");
 
     Ok((
         StatusCode::CREATED,
@@ -482,8 +554,11 @@ async fn create_tunnel(
     path = "/v1/tunnels",
     responses((status = 200, body = TunnelList), (status = 401, body = ErrorBody))
 )]
-async fn list_tunnels(State(state): State<Arc<AppState>>, _admin: Admin) -> ApiResult<Json<TunnelList>> {
-    let rows = state.db.list_tunnels().await?;
+async fn list_tunnels(State(state): State<Arc<AppState>>, caller: Caller) -> ApiResult<Json<TunnelList>> {
+    let rows = match caller.client_id() {
+        None => state.db.list_tunnels().await?,
+        Some(id) => state.db.list_client_tunnels(id.to_string()).await?,
+    };
     let tunnels = rows.iter().map(|row| tunnel_view(&state, row)).collect();
     Ok(Json(TunnelList { tunnels }))
 }
@@ -496,10 +571,10 @@ async fn list_tunnels(State(state): State<Arc<AppState>>, _admin: Admin) -> ApiR
 )]
 async fn get_tunnel(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TunnelView>> {
-    let row = find_tunnel(&state, &id).await?;
+    let row = find_tunnel(&state, &caller, &id).await?;
     Ok(Json(tunnel_view(&state, &row)))
 }
 
@@ -518,7 +593,7 @@ async fn get_tunnel(
 )]
 async fn patch_tunnel(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
     ApiJson(req): ApiJson<PatchTunnelRequest>,
 ) -> ApiResult<Json<TunnelView>> {
@@ -527,7 +602,7 @@ async fn patch_tunnel(
     }
     validate_label(req.label.as_deref())?;
     // Expiry is revocation: an expired tunnel cannot be revived by extending it.
-    let current = active_tunnel(&state, &id).await?;
+    let current = active_tunnel(&state, &caller, &id).await?;
     let access = match req.access {
         Some(a) => Some(build_access(a, Some(&current.access)).await?),
         None => None,
@@ -564,11 +639,15 @@ async fn patch_tunnel(
 )]
 async fn delete_tunnel(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     if !tokens::is_valid_tunnel_id(&id) {
         return Err(ApiError::not_found("tunnel"));
+    }
+    if matches!(caller, Caller::Client { .. }) {
+        // Clients may delete only their own live rows (tombstones have no owner).
+        find_tunnel(&state, &caller, &id).await?;
     }
     match state.delete_tunnel(&id, CloseReason::Deleted).await? {
         DeleteOutcome::Deleted => {
@@ -595,11 +674,11 @@ async fn delete_tunnel(
 )]
 async fn create_access_link(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
     ApiJson(req): ApiJson<CreateAccessLinkRequest>,
 ) -> ApiResult<(StatusCode, Json<AccessLinkResponse>)> {
-    let tunnel = active_tunnel(&state, &id).await?;
+    let tunnel = active_tunnel(&state, &caller, &id).await?;
     let t = now();
     let remaining = (tunnel.expires_at - t).max(0) as u64;
     if req.ttl_s < MIN_LINK_TTL_S || req.ttl_s > remaining {
@@ -651,9 +730,15 @@ async fn create_access_link(
 )]
 async fn delete_access_link(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    if matches!(caller, Caller::Client { .. }) {
+        let tunnel = state.db.access_link_tunnel(id.clone()).await?.ok_or_else(|| ApiError::not_found("access link"))?;
+        if find_tunnel(&state, &caller, &tunnel).await.is_err() {
+            return Err(ApiError::not_found("access link"));
+        }
+    }
     if !state.db.delete_access_link(id.clone()).await? {
         return Err(ApiError::not_found("access link"));
     }
@@ -677,7 +762,7 @@ async fn delete_access_link(
 )]
 async fn turn_credentials(
     State(state): State<Arc<AppState>>,
-    _admin: Admin,
+    caller: Caller,
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<TurnCredentialsResponse>> {
@@ -690,7 +775,7 @@ async fn turn_credentials(
     if !(MIN_ICE_TTL_S..=webrtc.sandbox_ttl_s).contains(&ttl_s) {
         return Err(ApiError::validation(format!("ttl_s must be within {MIN_ICE_TTL_S}..={}", webrtc.sandbox_ttl_s)));
     }
-    let tunnel = active_tunnel(&state, &id).await?;
+    let tunnel = active_tunnel(&state, &caller, &id).await?;
     let ice = ice::mint(&state.config, &tunnel.id, API_SUBJECT, ttl_s);
     Ok(Json(TurnCredentialsResponse { ice_servers: ice.ice_servers, expires_at: ice.expires_at, ttl_s: ice.ttl_s }))
 }
@@ -711,6 +796,148 @@ fn validate_label(label: Option<&str>) -> ApiResult<()> {
             Err(ApiError::validation(format!("label must be at most {MAX_LABEL_LEN} characters")))
         }
         _ => Ok(()),
+    }
+}
+
+// ----------------------------------------------------------------- clients
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateClientRequest {
+    /// 1..=64 characters: letters, digits, `.`, `_`, `-`.
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateClientResponse {
+    pub name: String,
+    /// Run this on the client machine. The code inside works once and expires at `expires_at`.
+    pub login_command: String,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ClientView {
+    pub name: String,
+    /// The login code has been used.
+    pub enrolled: bool,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    /// Unexpired tunnels this client created.
+    pub tunnels: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ClientList {
+    pub clients: Vec<ClientView>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollRequest {
+    /// `ctenr_…` code from `client add`.
+    pub code: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EnrollResponse {
+    pub name: String,
+    /// Long-lived client token (`ctcli_…`), shown once.
+    pub token: String,
+    /// `https://<api host>`
+    pub api: String,
+    /// `wss://<tunnel host>`
+    pub server: String,
+}
+
+impl From<ClientRow> for ClientView {
+    fn from(c: ClientRow) -> Self {
+        Self { name: c.name, enrolled: c.enrolled, created_at: c.created_at, last_used_at: c.last_used_at, tunnels: c.tunnels }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/clients",
+    request_body = CreateClientRequest,
+    responses((status = 201, body = CreateClientResponse), (status = 401, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody))
+)]
+async fn create_client(
+    State(state): State<Arc<AppState>>,
+    _admin: Admin,
+    ApiJson(req): ApiJson<CreateClientRequest>,
+) -> ApiResult<(StatusCode, Json<CreateClientResponse>)> {
+    match clients::add(&state.db, &state.config, &req.name).await {
+        Ok(e) => Ok((StatusCode::CREATED, Json(CreateClientResponse { name: e.name, login_command: e.login_command, expires_at: e.expires_at }))),
+        Err(clients::AddError::Invalid(m)) => Err(ApiError::validation(m)),
+        Err(clients::AddError::Taken) => {
+            Err(ApiError::new(StatusCode::CONFLICT, "client_exists", "a client with this name exists; delete it first"))
+        }
+        Err(clients::AddError::Other(e)) => Err(e.into()),
+    }
+}
+
+#[utoipa::path(get, path = "/v1/clients", responses((status = 200, body = ClientList), (status = 401, body = ErrorBody)))]
+async fn list_clients(State(state): State<Arc<AppState>>, _admin: Admin) -> ApiResult<Json<ClientList>> {
+    let clients = state.db.list_clients().await?.into_iter().map(ClientView::from).collect();
+    Ok(Json(ClientList { clients }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/clients/{name}",
+    params(("name" = String, Path, description = "Client name")),
+    responses((status = 204, description = "Deleted; its token stops working and its tunnels close"), (status = 401, body = ErrorBody), (status = 404, body = ErrorBody))
+)]
+async fn delete_client(
+    State(state): State<Arc<AppState>>,
+    _admin: Admin,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    let tunnels = state.db.delete_client(name.clone()).await?.ok_or_else(|| ApiError::not_found("client"))?;
+    for id in &tunnels {
+        state.delete_tunnel(id, CloseReason::Deleted).await?;
+    }
+    tracing::info!(client = %name, tunnels = tunnels.len(), "client deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Unauthenticated: the one-time code is the credential. Shares the
+/// access-link rate limit per IP.
+#[utoipa::path(
+    post,
+    path = "/v1/clients/enroll",
+    security(()),
+    request_body = EnrollRequest,
+    responses((status = 200, body = EnrollResponse), (status = 401, body = ErrorBody), (status = 429, body = ErrorBody))
+)]
+async fn enroll_client(
+    State(state): State<Arc<AppState>>,
+    peer: Option<axum::Extension<PeerAddr>>,
+    ApiJson(req): ApiJson<EnrollRequest>,
+) -> ApiResult<Json<EnrollResponse>> {
+    if let Some(axum::Extension(PeerAddr(addr))) = peer {
+        if !state.access_limiter.check(addr.ip()) {
+            return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "too many attempts; wait a minute"));
+        }
+    }
+    let code = req.code.trim();
+    if !code.starts_with(ENROLL_CODE_PREFIX) || code.len() > 256 {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid_code", "invalid, used, or expired login code"));
+    }
+    let token = tokens::random_token(CLIENT_TOKEN_PREFIX);
+    match state.db.enroll_client(tokens::hash_token(code), tokens::hash_token(&token)).await? {
+        Some(name) => {
+            tracing::info!(client = %name, "client enrolled");
+            Ok(Json(EnrollResponse {
+                name,
+                token,
+                api: format!("https://{}", state.config.api_host),
+                server: format!("wss://{}", state.config.tunnel_host),
+            }))
+        }
+        None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid_code", "invalid, used, or expired login code")),
     }
 }
 
@@ -767,19 +994,24 @@ async fn fresh_tunnel_id(state: &AppState) -> ApiResult<String> {
 }
 
 /// Tunnel row (expired or not) straight from the database; 404 if unknown or tombstoned.
-async fn find_tunnel(state: &AppState, id: &str) -> ApiResult<TunnelRow> {
+/// A tunnel the caller may use; another client's tunnel is "not found".
+async fn find_tunnel(state: &AppState, caller: &Caller, id: &str) -> ApiResult<TunnelRow> {
     if !tokens::is_valid_tunnel_id(id) {
         return Err(ApiError::not_found("tunnel"));
     }
-    state.db.get_tunnel(id.to_string()).await?.ok_or_else(|| ApiError::not_found("tunnel"))
+    match state.db.get_tunnel(id.to_string()).await? {
+        Some(row) if caller.may_use(&row) => Ok(row),
+        _ => Err(ApiError::not_found("tunnel")),
+    }
 }
 
 /// Unexpired tunnel; 409 if expired or tombstoned, 404 if never existed.
-async fn active_tunnel(state: &AppState, id: &str) -> ApiResult<TunnelRow> {
-    match find_tunnel(state, id).await {
+async fn active_tunnel(state: &AppState, caller: &Caller, id: &str) -> ApiResult<TunnelRow> {
+    match find_tunnel(state, caller, id).await {
         Ok(row) if row.is_expired() => Err(ApiError::expired()),
         Ok(row) => Ok(row),
-        Err(e) if e.status == StatusCode::NOT_FOUND && tokens::is_valid_tunnel_id(id) => {
+        // Tombstones carry no owner, so only the admin learns that an id ended.
+        Err(e) if e.status == StatusCode::NOT_FOUND && tokens::is_valid_tunnel_id(id) && matches!(caller, Caller::Admin) => {
             if state.db.is_tombstoned(id.to_string()).await? {
                 Err(ApiError::expired())
             } else {

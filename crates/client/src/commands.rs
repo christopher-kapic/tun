@@ -16,14 +16,14 @@ use crate::IceFormat;
 /// Covers the daemon's per-port server round trips plus its connect wait.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-enum Answer {
+pub(crate) enum Answer {
     Response(Response),
     /// Already reported; exit with this code.
     Exit(i32),
     Stopped,
 }
 
-async fn ask(req: Request, takeover: bool, json: bool) -> anyhow::Result<Answer> {
+pub(crate) async fn ask(req: Request, takeover: bool, json: bool) -> anyhow::Result<Answer> {
     let paths = Paths::resolve()?;
     match ensure_daemon(&paths, takeover).await? {
         Reach::Running(stream) => match call(stream, &req, REQUEST_TIMEOUT).await? {
@@ -59,7 +59,10 @@ fn expect_status(resp: Response) -> anyhow::Result<Status> {
 }
 
 pub async fn expose(ports: Vec<u16>) -> anyhow::Result<i32> {
-    let req = Request::Expose { ports, token: env_nonempty(ENV_TOKEN), server: env_nonempty(ENV_SERVER) };
+    // The server: $COCKPIT_TUNNEL_SERVER, else the one this machine logged in to
+    // (the daemon falls back to its saved server, then the build-time default).
+    let server = env_nonempty(ENV_SERVER).or_else(|| crate::login::Login::load().ok().flatten().map(|l| l.server));
+    let req = Request::Expose { ports, token: env_nonempty(ENV_TOKEN), server };
     match ask(req, true, false).await? {
         Answer::Response(resp) => {
             let status = expect_status(resp)?;
@@ -116,6 +119,8 @@ pub async fn ice(format: IceFormat, fresh: bool, exec: Vec<String>) -> anyhow::R
 
 pub async fn stop() -> anyhow::Result<i32> {
     let paths = Paths::resolve()?;
+    // A tunnel `share` created is deleted on the server, not just disconnected.
+    crate::share::delete_shared(&paths).await;
     if let Ok(stream) = UnixStream::connect(&paths.socket).await {
         // The daemon replies, deletes its state, and exits.
         if let Some(Response::Error { message }) = call(stream, &Request::Stop, REQUEST_TIMEOUT).await? {

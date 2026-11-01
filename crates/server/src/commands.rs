@@ -166,6 +166,75 @@ pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn client_add(config_path: &Path, name: &str) -> anyhow::Result<()> {
+    ensure_can_write(config_path, "client add")?;
+    let cfg = Config::load(config_path)?;
+    let db = Db::open(&cfg.db_path())?;
+    let result = crate::clients::add(&db, &cfg, name).await;
+    drop(db);
+    restore_ownership(config_path, &cfg)?;
+    match result {
+        Ok(e) => {
+            println!("Run this on {name} within {} minutes (it works once):\n", crate::clients::ENROLL_TTL_S / 60);
+            println!("  {}\n", e.login_command);
+            Ok(())
+        }
+        Err(crate::clients::AddError::Invalid(m)) => anyhow::bail!(m),
+        Err(crate::clients::AddError::Taken) => {
+            anyhow::bail!("client {name} exists; `client delete {name}` first to re-register it")
+        }
+        Err(crate::clients::AddError::Other(e)) => Err(e),
+    }
+}
+
+pub async fn client_list(config_path: &Path) -> anyhow::Result<()> {
+    let cfg = Config::load(config_path)?;
+    let db = Db::open(&cfg.db_path())?;
+    let clients = db.list_clients().await?;
+    drop(db);
+    restore_ownership(config_path, &cfg)?;
+    if clients.is_empty() {
+        println!("No clients. Add one with `cockpit-tunnel-server client add <name>`.");
+        return Ok(());
+    }
+    println!("{:<24} {:<12} {:<22} {:>7}", "NAME", "STATUS", "LAST USED", "TUNNELS");
+    for c in clients {
+        let status = if c.enrolled { "active" } else { "not logged in" };
+        let last = c.last_used_at.map(describe_ago).unwrap_or_else(|| "never".to_string());
+        println!("{:<24} {:<12} {:<22} {:>7}", c.name, status, last, c.tunnels);
+    }
+    Ok(())
+}
+
+pub async fn client_delete(config_path: &Path, name: &str) -> anyhow::Result<()> {
+    ensure_can_write(config_path, "client delete")?;
+    let cfg = Config::load(config_path)?;
+    let db = Db::open(&cfg.db_path())?;
+    let deleted = db.delete_client(name.to_string()).await?;
+    drop(db);
+    restore_ownership(config_path, &cfg)?;
+    match deleted {
+        Some(tunnels) => {
+            println!("Deleted client {name}; its token no longer works.");
+            if !tunnels.is_empty() {
+                println!("Its {} tunnel(s) stopped serving and close within 15 seconds.", tunnels.len());
+            }
+            Ok(())
+        }
+        None => anyhow::bail!("no client named {name}"),
+    }
+}
+
+fn describe_ago(unix: i64) -> String {
+    let s = (tokens::now() - unix).max(0);
+    match s {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} days ago", s / 86_400),
+    }
+}
+
 /// The install a config belongs to: a config in `/etc` is a root install.
 fn install_mode(config_path: &Path) -> Mode {
     if config_path.starts_with("/etc") {

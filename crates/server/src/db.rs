@@ -73,6 +73,22 @@ CREATE TABLE IF NOT EXISTS gate_grant_logins (
     PRIMARY KEY (session_hash, tunnel_id),
     FOREIGN KEY (session_hash, tunnel_id) REFERENCES gate_grants(session_hash, tunnel_id) ON DELETE CASCADE
 );
+-- Machines enrolled with `client add` + `cockpit-preview login`.
+CREATE TABLE IF NOT EXISTS clients (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    token_hash   TEXT UNIQUE,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER
+);
+-- One-time enrollment codes; only the hash is stored.
+CREATE TABLE IF NOT EXISTS client_enrollments (
+    code_hash  TEXT PRIMARY KEY,
+    client_id  TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER
+);
 "#;
 
 /// Columns added after the first release, as `(column, definition)`.
@@ -81,6 +97,8 @@ const TUNNEL_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("access_mode", "TEXT NOT NULL DEFAULT 'link'"),
     ("password_user", "TEXT"),
     ("password_hash", "TEXT"),
+    // The client that created the tunnel; NULL for the admin token.
+    ("client_id", "TEXT"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -164,6 +182,8 @@ pub struct TunnelRow {
     pub expires_at: i64,
     pub last_seen_at: Option<i64>,
     pub access: Access,
+    /// Creating client's id; `None` for tunnels created with the admin token.
+    pub client_id: Option<String>,
 }
 
 impl TunnelRow {
@@ -183,6 +203,7 @@ pub struct NewTunnel {
     pub inject_ice: bool,
     pub expires_at: i64,
     pub access: Access,
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -204,6 +225,18 @@ pub struct NewAccessLink {
     pub label: Option<String>,
     pub session_ttl_s: i64,
     pub expires_at: i64,
+}
+
+/// An enrolled machine.
+#[derive(Debug, Clone)]
+pub struct ClientRow {
+    pub name: String,
+    /// False until the enrollment code has been redeemed.
+    pub enrolled: bool,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    /// Unexpired tunnels it created.
+    pub tunnels: i64,
 }
 
 /// Outcome of redeeming an access link.
@@ -295,8 +328,8 @@ impl Db {
             let metadata = t.metadata.as_ref().map(|m| m.to_string());
             c.execute(
                 "INSERT INTO tunnels (id, token_hash, label, metadata, max_ports, host_header, inject_ice, created_at, expires_at,
-                                      access_mode, password_user, password_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                      access_mode, password_user, password_hash, client_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     t.id,
                     t.token_hash,
@@ -310,6 +343,7 @@ impl Db {
                     t.access.mode.as_str(),
                     t.access.password_user,
                     t.access.password_hash,
+                    t.client_id,
                 ],
             )?;
             Ok(TunnelRow {
@@ -323,6 +357,7 @@ impl Db {
                 expires_at: t.expires_at,
                 last_seen_at: None,
                 access: t.access,
+                client_id: t.client_id,
             })
         })
         .await
@@ -625,6 +660,161 @@ impl Db {
         .await
     }
 
+    // ---------------------------------------------------------------- clients
+
+    /// New client `name` with a one-time enrollment code (hash stored) valid
+    /// until `code_expires_at`. `None` if the name is taken.
+    pub async fn create_client(
+        &self,
+        id: String,
+        name: String,
+        code_hash: String,
+        code_expires_at: i64,
+    ) -> anyhow::Result<Option<ClientRow>> {
+        self.call(move |c| {
+            let t = now();
+            let tx = c.transaction()?;
+            let taken: i64 = tx.query_row("SELECT COUNT(*) FROM clients WHERE name = ?1", params![name], |r| r.get(0))?;
+            if taken > 0 {
+                return Ok(None);
+            }
+            tx.execute("INSERT INTO clients (id, name, created_at) VALUES (?1, ?2, ?3)", params![id, name, t])?;
+            tx.execute(
+                "INSERT INTO client_enrollments (code_hash, client_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                params![code_hash, id, t, code_expires_at],
+            )?;
+            tx.commit()?;
+            Ok(Some(ClientRow { name, enrolled: false, created_at: t, last_used_at: None, tunnels: 0 }))
+        })
+        .await
+    }
+
+    /// Redeem an enrollment code: single use, unexpired. Sets the client's token
+    /// hash (replacing any earlier token) and returns the client's name.
+    pub async fn enroll_client(&self, code_hash: String, token_hash: String) -> anyhow::Result<Option<String>> {
+        self.call(move |c| {
+            let t = now();
+            let tx = c.transaction()?;
+            let found: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT e.client_id, c.name FROM client_enrollments e JOIN clients c ON c.id = e.client_id
+                     WHERE e.code_hash = ?1 AND e.used_at IS NULL AND e.expires_at > ?2",
+                    params![code_hash, t],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((client_id, name)) = found else {
+                return Ok(None);
+            };
+            let n = tx.execute(
+                "UPDATE client_enrollments SET used_at = ?2 WHERE code_hash = ?1 AND used_at IS NULL",
+                params![code_hash, t],
+            )?;
+            if n != 1 {
+                return Ok(None);
+            }
+            tx.execute(
+                "UPDATE clients SET token_hash = ?2, last_used_at = ?3 WHERE id = ?1",
+                params![client_id, token_hash, t],
+            )?;
+            tx.commit()?;
+            Ok(Some(name))
+        })
+        .await
+    }
+
+    /// The client holding `token_hash`, recording use at most once a minute.
+    pub async fn client_by_token_hash(&self, token_hash: String) -> anyhow::Result<Option<(String, String)>> {
+        self.call(move |c| {
+            let t = now();
+            let found: Option<(String, String)> = c
+                .query_row("SELECT id, name FROM clients WHERE token_hash = ?1", params![token_hash], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()?;
+            if let Some((id, _)) = &found {
+                c.execute(
+                    "UPDATE clients SET last_used_at = ?2 WHERE id = ?1 AND (last_used_at IS NULL OR last_used_at < ?2 - 60)",
+                    params![id, t],
+                )?;
+            }
+            Ok(found)
+        })
+        .await
+    }
+
+    pub async fn list_clients(&self) -> anyhow::Result<Vec<ClientRow>> {
+        self.call(|c| {
+            let mut stmt = c.prepare(
+                "SELECT c.name, c.token_hash IS NOT NULL, c.created_at, c.last_used_at,
+                        (SELECT COUNT(*) FROM tunnels t WHERE t.client_id = c.id AND t.expires_at > ?1)
+                 FROM clients c ORDER BY c.name",
+            )?;
+            let rows = stmt
+                .query_map(params![now()], |r| {
+                    Ok(ClientRow {
+                        name: r.get(0)?,
+                        enrolled: r.get(1)?,
+                        created_at: r.get(2)?,
+                        last_used_at: r.get(3)?,
+                        tunnels: r.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Delete client `name` (its token and pending codes go with it) and
+    /// expire its tunnels so they stop serving at once. Returns the tunnel
+    /// ids so a running server can close them right away; otherwise the
+    /// expiry sweep does. `None` if there is no such client.
+    pub async fn delete_client(&self, name: String) -> anyhow::Result<Option<Vec<String>>> {
+        self.call(move |c| {
+            let t = now();
+            let tx = c.transaction()?;
+            let id: Option<String> = tx
+                .query_row("SELECT id FROM clients WHERE name = ?1", params![name], |r| r.get(0))
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(None);
+            };
+            let tunnels: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT id FROM tunnels WHERE client_id = ?1")?;
+                let rows = stmt.query_map(params![id], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            tx.execute(
+                "UPDATE tunnels SET expires_at = MIN(expires_at, ?2) WHERE client_id = ?1",
+                params![id, t - 1],
+            )?;
+            tx.execute("DELETE FROM clients WHERE id = ?1", params![id])?;
+            tx.commit()?;
+            Ok(Some(tunnels))
+        })
+        .await
+    }
+
+    /// The tunnel an access link belongs to.
+    pub async fn access_link_tunnel(&self, link_id: String) -> anyhow::Result<Option<String>> {
+        self.call(move |c| {
+            Ok(c.query_row("SELECT tunnel_id FROM access_links WHERE id = ?1", params![link_id], |r| r.get(0))
+                .optional()?)
+        })
+        .await
+    }
+
+    /// Unexpired tunnels created by `client_id`.
+    pub async fn list_client_tunnels(&self, client_id: String) -> anyhow::Result<Vec<TunnelRow>> {
+        self.call(move |c| {
+            let mut stmt = c.prepare(&format!("{TUNNEL_SELECT} WHERE client_id = ?1 ORDER BY created_at DESC"))?;
+            let rows = stmt.query_map(params![client_id], tunnel_from_row)?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
     // ------------------------------------------------------------------ purge
 
     /// Remove tombstones older than `tombstone_retention_s`, expired grants,
@@ -678,7 +868,7 @@ impl Db {
     }
 }
 
-const TUNNEL_SELECT: &str = "SELECT id, label, metadata, max_ports, host_header, inject_ice, created_at, expires_at, last_seen_at, access_mode, password_user, password_hash FROM tunnels";
+const TUNNEL_SELECT: &str = "SELECT id, label, metadata, max_ports, host_header, inject_ice, created_at, expires_at, last_seen_at, access_mode, password_user, password_hash, client_id FROM tunnels";
 
 /// Add columns that older databases lack.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
@@ -799,6 +989,7 @@ fn tunnel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TunnelRow> {
             password_user: r.get(10)?,
             password_hash: r.get(11)?,
         },
+        client_id: r.get(12)?,
     })
 }
 
@@ -843,6 +1034,7 @@ mod tests {
             inject_ice: false,
             expires_at: now() + 3600,
             access: password_access("h1"),
+            client_id: None,
         })
         .await
         .unwrap();
@@ -892,6 +1084,52 @@ mod tests {
         assert!(db.login_grant(id.clone(), "h2".into(), 3600, vec![]).await.unwrap().is_none());
         let row = db.get_tunnel(id.clone()).await.unwrap().unwrap();
         assert_eq!(row.access, Access::default());
+
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[tokio::test]
+    async fn client_enrollment_and_delete() {
+        let (db, path) = temp_db();
+        assert!(db.create_client("c1".into(), "laptop".into(), "code".into(), now() + 900).await.unwrap().is_some());
+        assert!(db.create_client("c2".into(), "laptop".into(), "code2".into(), now() + 900).await.unwrap().is_none());
+        assert!(db.create_client("c3".into(), "old".into(), "stale".into(), now() - 1).await.unwrap().is_some());
+
+        assert!(db.enroll_client("wrong".into(), "t".into()).await.unwrap().is_none());
+        assert!(db.enroll_client("stale".into(), "t".into()).await.unwrap().is_none(), "expired code");
+        assert_eq!(db.enroll_client("code".into(), "tok".into()).await.unwrap().as_deref(), Some("laptop"));
+        assert!(db.enroll_client("code".into(), "tok2".into()).await.unwrap().is_none(), "single use");
+        assert_eq!(db.client_by_token_hash("tok".into()).await.unwrap().map(|(id, _)| id).as_deref(), Some("c1"));
+
+        let mk = |id: &str, client: Option<&str>| NewTunnel {
+            id: id.into(),
+            token_hash: format!("tt-{id}"),
+            label: None,
+            metadata: None,
+            max_ports: 8,
+            host_header: HostHeaderMode::Rewrite,
+            inject_ice: false,
+            expires_at: now() + 3600,
+            access: Access::default(),
+            client_id: client.map(str::to_string),
+        };
+        db.create_tunnel(mk("own1aaaaaa", Some("c1"))).await.unwrap();
+        db.create_tunnel(mk("adm1aaaaaa", None)).await.unwrap();
+        assert_eq!(db.list_client_tunnels("c1".into()).await.unwrap().len(), 1);
+        let listed = db.list_clients().await.unwrap();
+        let laptop = listed.iter().find(|c| c.name == "laptop").unwrap();
+        assert!(laptop.enrolled && laptop.tunnels == 1);
+        assert!(!listed.iter().find(|c| c.name == "old").unwrap().enrolled);
+
+        assert_eq!(db.delete_client("laptop".into()).await.unwrap(), Some(vec!["own1aaaaaa".to_string()]));
+        assert!(db.client_by_token_hash("tok".into()).await.unwrap().is_none());
+        assert!(db.get_tunnel("own1aaaaaa".into()).await.unwrap().unwrap().is_expired());
+        assert!(!db.get_tunnel("adm1aaaaaa".into()).await.unwrap().unwrap().is_expired());
+        assert_eq!(db.expired_tunnel_ids().await.unwrap(), vec!["own1aaaaaa".to_string()]);
+        assert!(db.delete_client("laptop".into()).await.unwrap().is_none());
 
         drop(db);
         for suffix in ["", "-wal", "-shm"] {

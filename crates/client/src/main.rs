@@ -11,8 +11,10 @@ mod commands;
 mod daemon;
 mod ice;
 mod ipc;
+mod login;
 mod paths;
 mod session;
+mod share;
 mod state;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -55,8 +57,48 @@ enum Cmd {
         #[arg(last = true, requires = "exec", value_name = "CMD")]
         command: Vec<String>,
     },
-    /// Stop the daemon and forget exposed ports.
+    /// Stop the daemon and forget exposed ports (deletes a tunnel `share` created).
     Stop,
+    /// Log this machine in with the command `cockpit-tunnel-server client add` printed.
+    Login {
+        /// `<code>@<host>`
+        code: String,
+    },
+    /// Forget this machine's login.
+    Logout,
+    /// Share local ports from a logged-in machine. Default access: a one-time link per port.
+    Share {
+        #[arg(required = true, num_args = 1.., value_parser = clap::value_parser!(u16).range(1..))]
+        ports: Vec<u16>,
+        /// Anyone with the URL can open it.
+        #[arg(long, conflicts_with_all = ["password", "link"])]
+        public: bool,
+        /// Visitors sign in with a username and password (password from $COCKPIT_SHARE_PASSWORD or a prompt).
+        #[arg(long, conflicts_with = "link")]
+        password: bool,
+        /// Access links only (the default for a new share; switches an existing one back).
+        #[arg(long)]
+        link: bool,
+        /// Username for --password (default "preview").
+        #[arg(long, requires = "password")]
+        username: Option<String>,
+        /// How long the tunnel lives, e.g. 30m, 8h, 2d.
+        #[arg(long, default_value = "8h", value_parser = login::parse_duration)]
+        ttl: u64,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Print a new access link for what this machine is sharing.
+    Link {
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
+        /// Usable more than once until it expires.
+        #[arg(long)]
+        reusable: bool,
+        /// How long the link works, e.g. 10m, 1h.
+        #[arg(long, default_value = "10m", value_parser = login::parse_duration)]
+        ttl: u64,
+    },
     #[command(hide = true)]
     Daemon,
 }
@@ -106,6 +148,12 @@ async fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Status { json } => commands::status(json).await,
         Cmd::Ice { format, fresh, exec: _, command } => commands::ice(format, fresh, command).await,
         Cmd::Stop => commands::stop().await,
+        Cmd::Login { code } => share::login(&code).await,
+        Cmd::Logout => share::logout(),
+        Cmd::Share { ports, public, password, link, username, ttl, label } => {
+            share::share(ports, share::ShareAccess { public, password, link, username }, ttl, label).await
+        }
+        Cmd::Link { port, reusable, ttl } => share::link(port, reusable, ttl).await,
         Cmd::Daemon => daemon::run().await.map(|()| 0),
     }
 }

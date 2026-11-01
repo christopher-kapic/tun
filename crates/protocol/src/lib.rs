@@ -30,6 +30,10 @@ pub const CONNECT_PATH: &str = "/v1/connect";
 pub const ADMIN_TOKEN_PREFIX: &str = "ctadm_";
 pub const TUNNEL_TOKEN_PREFIX: &str = "cttun_";
 pub const ACCESS_TOKEN_PREFIX: &str = "ctacc_";
+/// Long-lived per-machine API token (`cockpit-preview login`).
+pub const CLIENT_TOKEN_PREFIX: &str = "ctcli_";
+/// One-time enrollment code printed by `client add`; traded for a client token.
+pub const ENROLL_CODE_PREFIX: &str = "ctenr_";
 
 /// Visitor gate cookie. Parent-domain (`Domain=<preview zone>`), HttpOnly,
 /// stripped before every origin request.

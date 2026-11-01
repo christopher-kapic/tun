@@ -139,6 +139,8 @@ async fn route(state: Arc<AppState>, hosts: &Hosts, peer: SocketAddr, req: Reque
         return control::handle_connect(state, req).await;
     }
     if host == hosts.api {
+        let mut req = req;
+        req.extensions_mut().insert(api::PeerAddr(peer));
         return api::handle(state, req).await;
     }
     if let Some(label) = hosts.preview_label(&host) {

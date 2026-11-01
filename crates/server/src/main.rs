@@ -1,6 +1,7 @@
 mod acme;
 mod api;
 mod commands;
+mod clients;
 mod config;
 mod control;
 mod db;
@@ -61,6 +62,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CertCmd,
     },
+    /// Machines that may create tunnels with their own token (`cockpit-preview login`).
+    Client {
+        #[command(subcommand)]
+        cmd: ClientCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClientCmd {
+    /// Register a machine and print the one-time login command to run on it.
+    Add { name: String },
+    /// List machines, when they were last used, and their open tunnels.
+    List,
+    /// Remove a machine: its token stops working and its tunnels close.
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -100,5 +116,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Status => commands::status(&config).await,
         Cmd::Backup { path } => commands::backup(&config, &path).await,
         Cmd::Cert { cmd: CertCmd::Renew { force } } => commands::cert_renew(&config, force).await,
+        Cmd::Client { cmd: ClientCmd::Add { name } } => commands::client_add(&config, &name).await,
+        Cmd::Client { cmd: ClientCmd::List } => commands::client_list(&config).await,
+        Cmd::Client { cmd: ClientCmd::Delete { name } } => commands::client_delete(&config, &name).await,
     }
 }
