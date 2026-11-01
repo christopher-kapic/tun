@@ -120,10 +120,10 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
         .max_frame_size(Some(MAX_WS_FRAME))
         .max_message_size(Some(MAX_WS_FRAME));
     let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(ws_config)).await;
-    let io = ws_bridge::ws_io(ws, PING_INTERVAL);
+    let (duplex, mut bridge) = ws_bridge::bridge(ws, PING_INTERVAL);
 
     // Boxed so `next()` works regardless of whether `Session` is `Unpin`.
-    let session = tokio_yamux::Session::new_server(io, yamux_config());
+    let session = tokio_yamux::Session::new_server(duplex, yamux_config());
     let control = session.control();
     let mut session = Box::pin(session);
 
@@ -131,12 +131,15 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
     let ctrl_stream = match first {
         Ok(Some(Ok(stream))) => stream,
         Ok(Some(Err(e))) => {
+            bridge.abort();
             return Err(anyhow::anyhow!("yamux error before control stream: {e}"));
         }
         Ok(None) => {
+            bridge.abort();
             return Err(anyhow::anyhow!("connection closed before control stream"));
         }
         Err(_) => {
+            bridge.abort();
             return Err(anyhow::anyhow!("no control stream within {CONTROL_STREAM_TIMEOUT:?}"));
         }
     };
@@ -172,6 +175,10 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
     let _ = tokio::time::timeout(TEARDOWN_GRACE, control.close()).await;
     if tokio::time::timeout(TEARDOWN_GRACE, &mut driver).await.is_err() {
         driver.abort();
+    }
+    // Dropping the session closed the duplex; the bridge sends a WebSocket close and exits.
+    if tokio::time::timeout(TEARDOWN_GRACE, &mut bridge).await.is_err() {
+        bridge.abort();
     }
     result
 }

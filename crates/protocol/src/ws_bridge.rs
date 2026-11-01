@@ -1,158 +1,128 @@
 //! Turn a WebSocket into a plain byte stream for Yamux.
 //!
-//! [`WsIo`] implements `AsyncRead`/`AsyncWrite` directly on the WebSocket, so
-//! Yamux's framed writer hands its buffered frames straight to the WebSocket
-//! (one binary message per write, flushed when Yamux flushes) and reads
-//! consume binary messages in place. There is no pump task and no extra copy
-//! through an in-memory pipe, and the two directions never wait on each other.
+//! Two tasks own the WebSocket halves and pump bytes between it and one half
+//! of a `tokio::io::duplex`, one per direction, so a slow write toward the
+//! peer never stalls reads from it (and vice versa). The writer drains all the
+//! bytes already waiting in the pipe into binary messages before one flush, so
+//! several Yamux frames written in quick succession cost one TLS write. Binary
+//! messages are concatenated on read; text frames are ignored.
 //!
-//! Keepalive: a ping every `ping_interval`; the stream fails after ~2.5
-//! intervals without hearing anything from the peer (any frame counts, so a
-//! busy link is never declared dead because its pong is queued behind data).
-//! Text frames are ignored. No nested RFC 6455: only bytes cross this pipe.
+//! Keepalive: the writer sends a ping every `ping_interval`; the pipe closes
+//! after ~2.5 intervals without hearing any frame from the peer (any frame
+//! counts, so a busy link is never declared dead because its pong is queued
+//! behind data). No nested RFC 6455: only bytes cross this pipe.
 
-use std::io;
-use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{Buf, Bytes};
-use futures_util::{Sink, Stream};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::time::{Instant, Interval, MissedTickBehavior};
-use tokio_tungstenite::tungstenite::{self, Message};
+use bytes::Bytes;
+use futures_util::{FutureExt, SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, MissedTickBehavior};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-/// Largest single WebSocket message written (well under the 512 KiB frame cap).
-const MAX_MESSAGE: usize = 64 * 1024;
+const DUPLEX_BUFFER: usize = 256 * 1024;
+const READ_CHUNK: usize = 64 * 1024;
+/// Most bytes fed between flushes (bounds latency of the first message).
+const MAX_BATCH: usize = 256 * 1024;
 
-pub struct WsIo<S> {
-    ws: WebSocketStream<S>,
-    /// Unread part of the last binary message.
-    rbuf: Bytes,
-    ticker: Interval,
-    last_heard: Instant,
-    dead_after: Duration,
-    ping_due: bool,
-}
-
-pub fn ws_io<S>(ws: WebSocketStream<S>, ping_interval: Duration) -> WsIo<S>
+pub fn bridge<S>(ws: WebSocketStream<S>, ping_interval: Duration) -> (DuplexStream, JoinHandle<()>)
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut ticker = tokio::time::interval_at(Instant::now() + ping_interval, ping_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    WsIo {
-        ws,
-        rbuf: Bytes::new(),
-        ticker,
-        last_heard: Instant::now(),
-        dead_after: ping_interval * 2 + ping_interval / 2,
-        ping_due: false,
-    }
-}
+    let (app_side, pump_side) = tokio::io::duplex(DUPLEX_BUFFER);
+    let handle = tokio::spawn(async move {
+        let (mut sink, mut stream) = ws.split();
+        let (mut rd, mut wr) = tokio::io::split(pump_side);
+        let started = Instant::now();
+        // Milliseconds since `started` when the peer was last heard from.
+        let heard = Arc::new(AtomicU64::new(0));
 
-fn to_io(e: tungstenite::Error) -> io::Error {
-    match e {
-        tungstenite::Error::Io(e) => e,
-        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => io::ErrorKind::BrokenPipe.into(),
-        e => io::Error::other(e),
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> WsIo<S> {
-    fn ws(&mut self) -> Pin<&mut WebSocketStream<S>> {
-        Pin::new(&mut self.ws)
-    }
-
-    /// Timer-driven keepalive, run from `poll_read` (which Yamux polls whenever
-    /// its session is polled). Registers the timer waker as a side effect.
-    fn poll_keepalive(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
-        while self.ticker.poll_tick(cx).is_ready() {
-            if self.last_heard.elapsed() > self.dead_after {
-                tracing::debug!("websocket keepalive timeout");
-                return Err(io::ErrorKind::TimedOut.into());
-            }
-            self.ping_due = true;
-        }
-        if self.ping_due {
-            if let Poll::Ready(r) = self.ws().poll_ready(cx) {
-                r.map_err(to_io)?;
-                self.ws().start_send(Message::Ping(Bytes::new())).map_err(to_io)?;
-                self.ping_due = false;
-                // Pending is fine: Yamux flushes on every session poll.
-                if let Poll::Ready(r) = self.ws().poll_flush(cx) {
-                    r.map_err(to_io)?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsIo<S> {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        this.poll_keepalive(cx)?;
-        loop {
-            if !this.rbuf.is_empty() {
-                let n = this.rbuf.len().min(buf.remaining());
-                buf.put_slice(&this.rbuf[..n]);
-                this.rbuf.advance(n);
-                return Poll::Ready(Ok(()));
-            }
-            match ready!(this.ws().poll_next(cx)) {
-                Some(Ok(msg)) => {
-                    this.last_heard = Instant::now();
+        let mut inbound = {
+            let heard = heard.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = stream.next().await {
+                    let Ok(msg) = msg else { break };
+                    heard.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                     match msg {
-                        Message::Binary(data) => this.rbuf = data,
-                        Message::Close(_) => return Poll::Ready(Ok(())),
+                        Message::Binary(data) => {
+                            if wr.write_all(&data).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Close(_) => break,
                         // Pings are answered by tungstenite on the next flush.
                         _ => {}
                     }
                 }
-                Some(Err(e)) => return Poll::Ready(Err(to_io(e))),
-                None => return Poll::Ready(Ok(())),
+                let _ = wr.shutdown().await;
+            })
+        };
+
+        let mut buf = vec![0u8; READ_CHUNK];
+        let mut ticker = tokio::time::interval(ping_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ticker.tick().await;
+        let dead_after = (ping_interval * 2 + ping_interval / 2).as_millis() as u64;
+
+        'outer: loop {
+            tokio::select! {
+                n = rd.read(&mut buf) => {
+                    let n = match n { Ok(0) | Err(_) => break, Ok(n) => n };
+                    if sink.feed(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                        break;
+                    }
+                    // Whatever else Yamux has already written goes out with it.
+                    let mut batched = n;
+                    let mut eof = false;
+                    while batched < MAX_BATCH {
+                        match rd.read(&mut buf).now_or_never() {
+                            Some(Ok(0)) | Some(Err(_)) => { eof = true; break; }
+                            Some(Ok(m)) => {
+                                if sink.feed(Message::Binary(Bytes::copy_from_slice(&buf[..m]))).await.is_err() {
+                                    break 'outer;
+                                }
+                                batched += m;
+                            }
+                            None => break,
+                        }
+                    }
+                    if sink.flush().await.is_err() || eof {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    let silent = (started.elapsed().as_millis() as u64).saturating_sub(heard.load(Ordering::Relaxed));
+                    if silent > dead_after {
+                        tracing::debug!("websocket keepalive timeout");
+                        break;
+                    }
+                    if sink.send(Message::Ping(Bytes::new())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = &mut inbound => break,
             }
         }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsIo<S> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        if data.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        ready!(this.ws().poll_ready(cx)).map_err(to_io)?;
-        let n = data.len().min(MAX_MESSAGE);
-        this.ws().start_send(Message::Binary(Bytes::copy_from_slice(&data[..n]))).map_err(to_io)?;
-        Poll::Ready(Ok(n))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().ws().poll_flush(cx).map_err(to_io)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match ready!(self.get_mut().ws().poll_close(cx)) {
-            Ok(()) | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => Poll::Ready(Ok(())),
-            Err(e) => Poll::Ready(Err(to_io(e))),
-        }
-    }
+        let _ = sink.close().await;
+        inbound.abort();
+    });
+    (app_side, handle)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::protocol::Role;
 
-    async fn pair(ping: Duration) -> (WsIo<tokio::io::DuplexStream>, WsIo<tokio::io::DuplexStream>) {
+    async fn pair(ping: Duration) -> (DuplexStream, DuplexStream) {
         let (a, b) = tokio::io::duplex(1 << 20);
         let a = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
         let b = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
-        (ws_io(a, ping), ws_io(b, ping))
+        (bridge(a, ping).0, bridge(b, ping).0)
     }
 
     #[tokio::test]
@@ -162,7 +132,6 @@ mod tests {
         let sent = big.clone();
         let writer = tokio::spawn(async move {
             a.write_all(&sent).await.unwrap();
-            a.flush().await.unwrap();
             let mut back = [0u8; 5];
             a.read_exact(&mut back).await.unwrap();
             back
@@ -171,14 +140,13 @@ mod tests {
         b.read_exact(&mut got).await.unwrap();
         assert_eq!(got, big);
         b.write_all(b"hello").await.unwrap();
-        b.flush().await.unwrap();
         assert_eq!(&writer.await.unwrap(), b"hello");
     }
 
     #[tokio::test]
-    async fn close_reads_as_eof() {
-        let (mut a, mut b) = pair(Duration::from_secs(30)).await;
-        a.shutdown().await.unwrap();
+    async fn closing_one_side_reads_as_eof() {
+        let (a, mut b) = pair(Duration::from_secs(30)).await;
+        drop(a);
         let mut buf = [0u8; 8];
         assert_eq!(b.read(&mut buf).await.unwrap(), 0);
     }
@@ -187,25 +155,21 @@ mod tests {
     async fn silent_peer_times_out() {
         let (a, b) = tokio::io::duplex(1 << 16);
         let a = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
-        let mut a = ws_io(a, Duration::from_secs(10));
-        // `b` is never read, so no pong ever comes back.
-        let _b = b;
+        let (mut a, _) = bridge(a, Duration::from_secs(10));
+        let _b = b; // never read: no pong ever comes back
         let mut buf = [0u8; 8];
-        let err = tokio::time::timeout(Duration::from_secs(60), a.read(&mut buf)).await.unwrap().unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let n = tokio::time::timeout(Duration::from_secs(60), a.read(&mut buf)).await.unwrap().unwrap();
+        assert_eq!(n, 0);
     }
 
     #[tokio::test(start_paused = true)]
     async fn pings_keep_an_idle_link_alive() {
         let (mut a, mut b) = pair(Duration::from_secs(10)).await;
-        let mut buf = [0u8; 8];
-        let both = async {
-            tokio::select! {
-                r = a.read(&mut buf) => panic!("a ended: {r:?}"),
-                r = async { let mut x = [0u8; 8]; b.read(&mut x).await } => panic!("b ended: {r:?}"),
-                _ = tokio::time::sleep(Duration::from_secs(120)) => {}
-            }
-        };
-        both.await;
+        let (mut x, mut y) = ([0u8; 8], [0u8; 8]);
+        tokio::select! {
+            r = a.read(&mut x) => panic!("a ended: {r:?}"),
+            r = b.read(&mut y) => panic!("b ended: {r:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(120)) => {}
+        }
     }
 }
