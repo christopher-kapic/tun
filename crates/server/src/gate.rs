@@ -145,6 +145,83 @@ pub async fn redeem(
         .expect("valid response")
 }
 
+/// Largest login form body accepted.
+const LOGIN_BODY_LIMIT: usize = 8 * 1024;
+
+/// `POST /__login` on a password-mode tunnel: check the username and password,
+/// then mint a session exactly like a link redemption and send the visitor on
+/// to `next`. Failures re-render the form; attempts share the access-link rate limit.
+pub async fn login(
+    state: &AppState,
+    peer: IpAddr,
+    tunnel: &crate::db::TunnelRow,
+    body: hyper::body::Incoming,
+    cookie_values: &[String],
+) -> Response<Body> {
+    use http_body_util::BodyExt;
+
+    if !state.access_limiter.check(peer) {
+        return pages::rate_limited();
+    }
+    let raw = match http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => return pages::login(StatusCode::PAYLOAD_TOO_LARGE, "/", Some("The form was too large.")),
+    };
+    let (mut username, mut password, mut next) = (String::new(), String::new(), String::new());
+    for (k, v) in url::form_urlencoded::parse(&raw) {
+        match &*k {
+            "username" => username = v.into_owned(),
+            "password" => password = v.into_owned(),
+            "next" => next = v.into_owned(),
+            _ => {}
+        }
+    }
+    let next = safe_next(&next);
+    let (Some(user), Some(hash)) = (tunnel.access.password_user.clone(), tunnel.access.password_hash.clone()) else {
+        return pages::not_found();
+    };
+    if !crate::password::verify(user, hash.clone(), username, password).await {
+        Metrics::inc(&state.metrics.access_failures);
+        return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password."));
+    }
+
+    let ttl = state.config.limits.default_session_ttl_s as i64;
+    let granted = state.db.login_grant(tunnel.id.clone(), hash, ttl, session_hashes(cookie_values)).await;
+    let (session_id, expires_at) = match granted {
+        Ok(Some(Redemption::Granted { session_id, expires_at })) => (session_id, expires_at),
+        // The password or mode changed while we were checking.
+        Ok(_) => return pages::login(StatusCode::UNAUTHORIZED, &next, Some("Wrong username or password.")),
+        Err(e) => {
+            tracing::error!(tunnel = %tunnel.id, error = %e, "password login failed");
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
+        }
+    };
+    Metrics::inc(&state.metrics.access_redemptions);
+    tracing::info!(tunnel = %tunnel.id, "password login");
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, next)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::SET_COOKIE, gate_cookie(&state.config.preview_zone, &session_id, expires_at - now()))
+        .body(empty())
+        .expect("valid response")
+}
+
+/// Same-host path to continue to after signing in; anything else becomes `/`.
+pub fn safe_next(next: &str) -> String {
+    let ok = next.starts_with('/')
+        && !next.starts_with("//")
+        && !next.starts_with("/\\")
+        && !next.starts_with("/__")
+        && next.len() <= 2048
+        && !next.chars().any(|c| c.is_control() || c == '\\');
+    if ok {
+        next.to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
 fn gate_cookie(zone: &str, value: &str, max_age: i64) -> String {
     format!(
         "{GATE_COOKIE}={value}; Domain={zone}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={}",
@@ -181,6 +258,14 @@ mod tests {
 
         let many: Vec<String> = (0..MAX_GATE_VALUES + 10).map(|i| format!("{i:0>43}")).collect();
         assert_eq!(session_hashes(&many).len(), MAX_GATE_VALUES);
+    }
+
+    #[test]
+    fn next_is_same_host_path_only() {
+        assert_eq!(safe_next("/app?x=1"), "/app?x=1");
+        for bad in ["", "https://evil.example", "//evil.example", "/\\evil.example", "/__access/x", "/a\\b", "app"] {
+            assert_eq!(safe_next(bad), "/", "{bad}");
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod listener;
 mod metrics;
 mod mode;
 mod pages;
+mod password;
 mod proxy;
 mod purge;
 mod ratelimit;

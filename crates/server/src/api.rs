@@ -22,7 +22,8 @@ use tower::ServiceExt;
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 
-use crate::db::{DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow};
+use crate::db::{Access, AccessMode, DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow};
+use crate::password;
 use crate::ice;
 use crate::state::AppState;
 use crate::tokens::{self, now};
@@ -216,6 +217,34 @@ pub struct CreateTunnelRequest {
     #[serde(default)]
     #[schema(value_type = Option<Object>)]
     pub metadata: Option<serde_json::Value>,
+    /// Who may open previews (default: access links only).
+    #[serde(default)]
+    pub access: Option<AccessRequest>,
+}
+
+/// Access setting. Access links work in every mode.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRequest {
+    /// `link`: access links only. `password`: links, or the username and
+    /// password on the preview's login page. `public`: anyone with the URL.
+    pub mode: AccessMode,
+    /// Password mode only (1..=64 characters). On PATCH, omitted keeps the current one.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Password mode only (8..=256 characters); never returned. On PATCH,
+    /// omitted keeps the current one. A new password signs out everyone who
+    /// logged in with the old one.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AccessView {
+    pub mode: AccessMode,
+    /// Set in password mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -241,6 +270,9 @@ pub struct PatchTunnelRequest {
     pub host_header: Option<HostHeaderMode>,
     #[serde(default)]
     pub inject_ice: Option<bool>,
+    /// Replace the access setting.
+    #[serde(default)]
+    pub access: Option<AccessRequest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -254,6 +286,7 @@ pub struct PortView {
 pub struct TunnelView {
     pub id: String,
     pub label: Option<String>,
+    pub access: AccessView,
     #[schema(value_type = Option<Object>)]
     pub metadata: Option<serde_json::Value>,
     /// A control connection is live.
@@ -337,6 +370,9 @@ pub struct TurnCredentialsResponse {
         ErrorDetail,
         CreateTunnelRequest,
         CreateTunnelResponse,
+        AccessRequest,
+        AccessView,
+        AccessMode,
         PatchTunnelRequest,
         PortView,
         TunnelView,
@@ -404,6 +440,12 @@ async fn create_tunnel(
         }
     }
 
+    let access = match req.access {
+        Some(a) => build_access(a, None).await?,
+        None => Access::default(),
+    };
+    let mode = access.mode;
+
     let id = fresh_tunnel_id(&state).await?;
     let token = tokens::random_token(TUNNEL_TOKEN_PREFIX);
     let row = state
@@ -417,11 +459,12 @@ async fn create_tunnel(
             host_header: req.host_header.unwrap_or(HostHeaderMode::Rewrite),
             inject_ice: req.inject_ice.unwrap_or(true),
             expires_at: now() + req.ttl_s as i64,
+            access,
         })
         .await?;
     // A cached negative lookup for this id (e.g. a probe) must not hide the new tunnel.
     state.invalidate_tunnel(&row.id);
-    tracing::info!(tunnel = %row.id, max_ports, expires_at = row.expires_at, "tunnel created");
+    tracing::info!(tunnel = %row.id, max_ports, access = mode.as_str(), expires_at = row.expires_at, "tunnel created");
 
     Ok((
         StatusCode::CREATED,
@@ -484,16 +527,27 @@ async fn patch_tunnel(
     }
     validate_label(req.label.as_deref())?;
     // Expiry is revocation: an expired tunnel cannot be revived by extending it.
-    active_tunnel(&state, &id).await?;
+    let current = active_tunnel(&state, &id).await?;
+    let access = match req.access {
+        Some(a) => Some(build_access(a, Some(&current.access)).await?),
+        None => None,
+    };
+    let access_changed = access.as_ref().is_some_and(|a| *a != current.access);
 
     let patch = TunnelPatch {
         expires_at: req.ttl_s.map(|ttl| now() + ttl as i64),
         label: req.label,
         host_header: req.host_header,
         inject_ice: req.inject_ice,
+        access,
     };
     let row = state.db.update_tunnel(id.clone(), patch).await?;
     state.invalidate_tunnel(&id);
+    if access_changed {
+        // A password change may have revoked sessions.
+        state.invalidate_sessions();
+        tracing::info!(tunnel = %id, access = row.as_ref().map(|r| r.access.mode.as_str()), "tunnel access changed");
+    }
     let row = row.ok_or_else(|| ApiError::not_found("tunnel"))?;
     Ok(Json(tunnel_view(&state, &row)))
 }
@@ -660,6 +714,47 @@ fn validate_label(label: Option<&str>) -> ApiResult<()> {
     }
 }
 
+/// Validate an access request; hashes a new password. `current` is the stored
+/// setting on PATCH, which supplies an omitted username or password.
+async fn build_access(req: AccessRequest, current: Option<&Access>) -> ApiResult<Access> {
+    if req.mode != AccessMode::Password {
+        if req.username.is_some() || req.password.is_some() {
+            return Err(ApiError::validation("username and password apply only to access mode \"password\""));
+        }
+        return Ok(Access { mode: req.mode, password_user: None, password_hash: None });
+    }
+    let current = current.filter(|c| c.mode == AccessMode::Password);
+    let username = match req.username.or_else(|| current.and_then(|c| c.password_user.clone())) {
+        Some(u) => u,
+        None => return Err(ApiError::validation("access.username is required for password mode")),
+    };
+    let len = username.chars().count();
+    if !(1..=password::MAX_USERNAME_LEN).contains(&len) || username.chars().any(char::is_control) {
+        return Err(ApiError::validation(format!(
+            "access.username must be 1..={} characters without control characters",
+            password::MAX_USERNAME_LEN
+        )));
+    }
+    let password_hash = match req.password {
+        Some(p) => {
+            let len = p.chars().count();
+            if !(password::MIN_PASSWORD_LEN..=password::MAX_PASSWORD_LEN).contains(&len) {
+                return Err(ApiError::validation(format!(
+                    "access.password must be {}..={} characters",
+                    password::MIN_PASSWORD_LEN,
+                    password::MAX_PASSWORD_LEN
+                )));
+            }
+            password::hash(p).await?
+        }
+        None => match current.and_then(|c| c.password_hash.clone()) {
+            Some(h) => h,
+            None => return Err(ApiError::validation("access.password is required for password mode")),
+        },
+    };
+    Ok(Access { mode: AccessMode::Password, password_user: Some(username), password_hash: Some(password_hash) })
+}
+
 /// Ids are never reused: retry while the id belongs to a tunnel or a tombstone.
 async fn fresh_tunnel_id(state: &AppState) -> ApiResult<String> {
     for _ in 0..ID_ATTEMPTS {
@@ -709,6 +804,7 @@ fn tunnel_view(state: &AppState, row: &TunnelRow) -> TunnelView {
     TunnelView {
         id: row.id.clone(),
         label: row.label.clone(),
+        access: AccessView { mode: row.access.mode, username: row.access.password_user.clone() },
         metadata: row.metadata.clone(),
         connected: live.is_some(),
         connected_since: live.as_ref().map(|l| l.connected_at),

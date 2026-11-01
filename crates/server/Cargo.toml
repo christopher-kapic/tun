@@ -44,6 +44,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rustls-pemfile = "2"
 sha1 = "0.10"
 subtle = "2"
+argon2 = "0.5"
 time = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 toml = "0.8"

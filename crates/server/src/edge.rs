@@ -1,9 +1,9 @@
 //! Visitor-facing edge for `*.<preview_zone>`.
 //!
-//! Order: label → `/__access/*` → tunnel lifecycle → gate (with the CORS
-//! preflight exception) → `/__cockpit/*` → live port → proxy. Reserved paths
-//! are never forwarded, and the origin is never contacted for a request that
-//! fails the gate.
+//! Order: label → `/__access/*` → tunnel lifecycle → `/__login` → gate (with
+//! the CORS preflight exception; skipped for public tunnels) → `/__cockpit/*`
+//! → live port → proxy. Reserved paths are never forwarded, and the origin is
+//! never contacted for a request that fails the gate.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body::Body as HttpBody;
 use hyper::body::Incoming;
 
-use crate::db::{TunnelLookup, TunnelRow};
+use crate::db::{AccessMode, TunnelLookup, TunnelRow};
 use crate::gate;
 use crate::headers;
 use crate::ice;
@@ -26,6 +26,9 @@ use crate::util::{header_str, json_response, text_response, Body};
 
 const ACCESS_PREFIX: &str = "/__access";
 const COCKPIT_PREFIX: &str = "/__cockpit";
+const LOGIN_PATH: &str = "/__login";
+/// TURN username subject for visitors of a public tunnel (no session).
+const PUBLIC_SUBJECT: &str = "public";
 const ICE_PATH: &str = "/__cockpit/ice";
 /// Gate-session hash prefix used as the TURN username subject (coturn log attribution).
 const SUBJECT_LEN: usize = 8;
@@ -81,7 +84,17 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
         if !method_ok || token.is_empty() || token.contains('/') {
             return pages::not_found();
         }
-        return gate::redeem(state, peer.ip(), id, token, &cookies.values).await;
+        let resp = gate::redeem(state, peer.ip(), id, token, &cookies.values).await;
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return resp;
+        }
+        // A used or expired link still leads somewhere useful when the tunnel
+        // has another way in. Unknown and ended tunnels keep the generic 401.
+        return match live_access_mode(state, id).await {
+            Some(AccessMode::Password) => pages::login(StatusCode::UNAUTHORIZED, "/", None),
+            Some(AccessMode::Public) => redirect_root(),
+            _ => resp,
+        };
     }
 
     let lookup = match state.tunnel(id).await {
@@ -94,23 +107,51 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
         TunnelLookup::Unknown => return pages::not_found(),
     };
 
+    let mode = tunnel.access.mode;
+    if path == LOGIN_PATH {
+        if mode != AccessMode::Password {
+            return pages::not_found();
+        }
+        return match *req.method() {
+            Method::GET | Method::HEAD => {
+                let next = req
+                    .uri()
+                    .query()
+                    .and_then(|q| url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "next"))
+                    .map(|(_, v)| gate::safe_next(&v))
+                    .unwrap_or_else(|| "/".to_string());
+                pages::login(StatusCode::OK, &next, None)
+            }
+            Method::POST => gate::login(state, peer.ip(), tunnel, req.into_body(), &cookies.values).await,
+            _ => pages::not_found(),
+        };
+    }
+
     let session_hash = match gate::authorize(state, id, &cookies.values).await {
         Ok(s) => s,
         Err(e) => return internal_error(id, e),
     };
     let reserved = is_under(&path, COCKPIT_PREFIX);
 
-    let Some(session_hash) = session_hash else {
-        if !reserved && is_same_tunnel_preflight(&req, &state.config.preview_zone, id) {
-            // Preflights never carry credentials; forward without any cookie.
-            if let Some(req) = preflight_only(req) {
-                return forward_live(state, tunnel, port, req, None, peer, None).await;
+    let subject = match session_hash {
+        Some(hash) => hash[..SUBJECT_LEN].to_string(),
+        None if mode == AccessMode::Public => PUBLIC_SUBJECT.to_string(),
+        None => {
+            let login_next = (mode == AccessMode::Password && wants_page(&req))
+                .then(|| req.uri().path_and_query().map(|p| gate::safe_next(p.as_str())).unwrap_or_default());
+            if !reserved && is_same_tunnel_preflight(&req, &state.config.preview_zone, id) {
+                // Preflights never carry credentials; forward without any cookie.
+                if let Some(req) = preflight_only(req) {
+                    return forward_live(state, tunnel, port, req, None, peer, None).await;
+                }
             }
+            Metrics::inc(&state.metrics.gate_denials);
+            if let Some(next) = login_next {
+                return pages::login(StatusCode::UNAUTHORIZED, &next, None);
+            }
+            return pages::unauthorized();
         }
-        Metrics::inc(&state.metrics.gate_denials);
-        return pages::unauthorized();
     };
-    let subject = session_hash[..SUBJECT_LEN].to_string();
 
     if reserved {
         let method_ok = *req.method() == Method::GET || *req.method() == Method::HEAD;
@@ -122,6 +163,36 @@ async fn route(state: &Arc<AppState>, peer: SocketAddr, label: &str, req: Reques
     }
 
     forward_live(state, tunnel, port, req, cookies.forward, peer, Some(subject)).await
+}
+
+/// The access mode of a live, unexpired tunnel.
+async fn live_access_mode(state: &Arc<AppState>, id: &str) -> Option<AccessMode> {
+    match &*state.tunnel(id).await.ok()? {
+        TunnelLookup::Live(t) if !t.is_expired() => Some(t.access.mode),
+        _ => None,
+    }
+}
+
+fn redirect_root() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .body(crate::util::empty())
+        .expect("valid response")
+}
+
+/// A browser loading a page (top level or in an iframe), as opposed to a
+/// fetch, script, or image, which should get a plain 401 rather than a form.
+fn wants_page(req: &Request<Incoming>) -> bool {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) {
+        return false;
+    }
+    match header_str(req.headers().get("sec-fetch-dest")) {
+        Some(dest) => matches!(dest, "document" | "iframe" | "frame"),
+        None => header_str(req.headers().get(header::ACCEPT)).is_some_and(|a| a.contains("text/html")),
+    }
 }
 
 /// Only ports the connected client declared are routable; anything else is
