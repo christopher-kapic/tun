@@ -20,7 +20,7 @@ Cargo.toml                 workspace, shared dependency versions, release profil
 install.sh                 curl | sh installer: download, verify, exec `setup`
 crates/protocol/           wire messages, constants, mux (rust-yamux driver), WebSocket↔bytes bridge
 crates/server/             cockpit-tunnel-server (VPS)
-  src/main.rs              CLI: serve | setup | token rotate | health-token | status | backup | cert renew | client
+  src/main.rs              CLI: serve | setup | token rotate | health-token | status | backup | restore | cert renew | client
   src/commands.rs          non-interactive subcommands; `serve` wires everything together
   src/listener.rs          :443 (SNI peek → coturn passthrough, else TLS + hyper auto) and :80 redirect
   src/edge.rs proxy.rs     visitor edge: lifecycle, gate, reserved paths, forwarding, WebSockets
@@ -98,7 +98,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p cockpit-tunnel-s
    One hostname covers everything: the API and sandbox tunnel use it, previews are
    `*.<host>`, TURN is `turn.<host>`, and two DNS records (`<host>`, `*.<host>`) suffice.
 
-Admin commands: `cockpit-tunnel-server status`, `token rotate`, `backup <path>`,
+Admin commands: `cockpit-tunnel-server status`, `token rotate`, `backup <path>`, `restore <path>`,
 `cert renew [--force]`, and `client add <name> | list | delete <name>` (root only
 for a root install).
 
@@ -109,6 +109,12 @@ default; `cockpit-tunnel-server health-token set` makes it answer only callers
 presenting the printed token (`Authorization: Bearer …` or `?token=…`, for uptime
 monitors) or the admin token, and a 404 to everyone else. `health-token clear`
 reopens it.
+
+Backups: `backup <path>` writes a consistent copy of the database (0600; it holds
+token hashes). `restore <path>` checks the copy's integrity, stops the service,
+keeps the current database as `cockpit-tunnel.db.before-restore-<time>`, swaps the
+copy in, and starts the service again. The config file (`config.toml`) and the
+`certs/` directory are not in the database; back them up separately.
 
 ### Tunnels and access
 

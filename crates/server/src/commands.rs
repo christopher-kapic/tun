@@ -179,6 +179,71 @@ pub async fn backup(config_path: &Path, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tables a restorable backup must have.
+const REQUIRED_TABLES: &[&str] = &["tunnels", "access_links", "gate_sessions", "clients"];
+
+/// Check that `path` is an intact cockpit-tunnel database.
+fn check_backup(path: &Path) -> anyhow::Result<()> {
+    use rusqlite::{Connection, OpenFlags};
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening {}", path.display()))?;
+    let integrity: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).context("integrity check")?;
+    anyhow::ensure!(integrity == "ok", "{} failed the integrity check: {integrity}", path.display());
+    for table in REQUIRED_TABLES {
+        let n: i64 =
+            c.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| {
+                r.get(0)
+            })?;
+        anyhow::ensure!(n == 1, "{} is not a cockpit-tunnel database (no {table} table)", path.display());
+    }
+    Ok(())
+}
+
+pub async fn restore(config_path: &Path, backup: &Path) -> anyhow::Result<()> {
+    ensure_can_write(config_path, "restore")?;
+    let mode = install_mode(config_path);
+    let cfg = Config::load(config_path)?;
+    check_backup(backup)?;
+    let db_path = cfg.db_path();
+
+    let was_running = mode.service_state(SERVICE_NAME) == "active";
+    if was_running {
+        anyhow::ensure!(mode.systemctl_ok(&["stop", SERVICE_NAME]), "stopping {SERVICE_NAME} failed");
+    }
+    let result = (|| -> anyhow::Result<Option<std::path::PathBuf>> {
+        let kept = if db_path.exists() {
+            let aside = db_path.with_extension(format!("db.before-restore-{}", tokens::now()));
+            std::fs::rename(&db_path, &aside).with_context(|| format!("moving {} aside", db_path.display()))?;
+            Some(aside)
+        } else {
+            None
+        };
+        // Stale WAL files belong to the old database and must not be replayed into the new one.
+        for ext in ["db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(db_path.with_extension(ext));
+        }
+        let tmp = db_path.with_extension("db.restoring");
+        std::fs::copy(backup, &tmp).with_context(|| format!("copying {}", backup.display()))?;
+        crate::config::set_mode(&tmp, 0o600)?;
+        std::fs::rename(&tmp, &db_path)?;
+        restore_ownership(config_path, &cfg)?;
+        Ok(kept)
+    })();
+    // Start again even if the swap failed, so a failed restore never leaves the server down.
+    if was_running && !mode.systemctl_ok(&["start", SERVICE_NAME]) {
+        eprintln!("warning: starting {SERVICE_NAME} failed; check `{}`", mode.journal_hint());
+    }
+    let kept = result?;
+    println!("Restored {} from {}.", db_path.display(), backup.display());
+    if let Some(k) = kept {
+        println!("The previous database is kept at {}.", k.display());
+    }
+    if was_running {
+        println!("Restarted {SERVICE_NAME}. Connected sandboxes reconnect on their own.");
+    }
+    Ok(())
+}
+
 pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()> {
     ensure_can_write(config_path, "cert renew")?;
     let cfg = Config::load(config_path)?;
@@ -305,5 +370,28 @@ fn describe_time(unix: i64) -> String {
     match time::OffsetDateTime::from_unix_timestamp(unix) {
         Ok(t) => format!("{} UTC ({days} days)", t.date()),
         Err(_) => format!("{unix} ({days} days)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn backups_pass_the_restore_check_and_junk_does_not() {
+        let dir = std::env::temp_dir().join(format!("ct-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("live.db")).unwrap();
+        db.backup_to(dir.join("backup.db")).await.unwrap();
+        check_backup(&dir.join("backup.db")).unwrap();
+
+        std::fs::write(dir.join("junk.db"), b"not a database").unwrap();
+        assert!(check_backup(&dir.join("junk.db")).is_err());
+        let other = rusqlite::Connection::open(dir.join("other.db")).unwrap();
+        other.execute_batch("CREATE TABLE t (x)").unwrap();
+        drop(other);
+        assert!(check_backup(&dir.join("other.db")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

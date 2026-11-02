@@ -64,6 +64,9 @@ enum Cmd {
     Status,
     /// Write a consistent SQLite backup (`VACUUM INTO`).
     Backup { path: PathBuf },
+    /// Replace the database with a backup: checks it, stops the service, keeps
+    /// the current database as `<db>.before-restore-<time>`, starts again.
+    Restore { path: PathBuf },
     /// Certificate management.
     Cert {
         #[command(subcommand)]
@@ -131,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::HealthToken { cmd } => commands::health_token(&config, matches!(cmd, HealthTokenCmd::Set)).await,
         Cmd::Status => commands::status(&config).await,
         Cmd::Backup { path } => commands::backup(&config, &path).await,
+        Cmd::Restore { path } => commands::restore(&config, &path).await,
         Cmd::Cert { cmd: CertCmd::Renew { force } } => commands::cert_renew(&config, force).await,
         Cmd::Client { cmd: ClientCmd::Add { name } } => commands::client_add(&config, &name).await,
         Cmd::Client { cmd: ClientCmd::List } => commands::client_list(&config).await,
