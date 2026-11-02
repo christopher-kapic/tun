@@ -31,11 +31,7 @@ pub fn ask(question: &str, default: &str) -> anyhow::Result<String> {
 }
 
 /// `ask` repeated until `parse` accepts the answer.
-pub fn ask_with<T>(
-    question: &str,
-    default: &str,
-    parse: impl Fn(&str) -> Result<T, String>,
-) -> anyhow::Result<T> {
+pub fn ask_with<T>(question: &str, default: &str, parse: impl Fn(&str) -> Result<T, String>) -> anyhow::Result<T> {
     loop {
         let answer = ask(question, default)?;
         match parse(&answer) {
@@ -127,12 +123,8 @@ struct EchoOff {
 
 impl EchoOff {
     fn new() -> Self {
-        let active = Command::new("stty")
-            .arg("-echo")
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let active =
+            Command::new("stty").arg("-echo").stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
         Self { active }
     }
 }

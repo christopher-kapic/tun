@@ -103,26 +103,21 @@ pub fn not_found() -> Response<Body> {
 
 /// Deliberately generic: never says whether a link was unknown, used, or expired.
 pub fn unauthorized() -> Response<Body> {
-    page(
-        StatusCode::UNAUTHORIZED,
-        "Access required",
-        "Open this preview from the link you were given.",
-        None,
-    )
+    page(StatusCode::UNAUTHORIZED, "Access required", "Open this preview from the link you were given.", None)
 }
 
 /// A gated WebSocket or write started by another preview (see `edge`).
 pub fn forbidden_origin() -> Response<Body> {
-    page(
-        StatusCode::FORBIDDEN,
-        "Blocked",
-        "This preview does not accept requests started by another preview.",
-        None,
-    )
+    page(StatusCode::FORBIDDEN, "Blocked", "This preview does not accept requests started by another preview.", None)
 }
 
 pub fn gateway_timeout() -> Response<Body> {
-    page(StatusCode::GATEWAY_TIMEOUT, "App did not respond", "The app accepted the request but did not answer in time.", None)
+    page(
+        StatusCode::GATEWAY_TIMEOUT,
+        "App did not respond",
+        "The app accepted the request but did not answer in time.",
+        None,
+    )
 }
 
 pub fn busy() -> Response<Body> {
@@ -136,7 +131,12 @@ pub fn busy() -> Response<Body> {
 
 /// Too many visitor lookups in flight server-wide (see `state`).
 pub fn server_busy() -> Response<Body> {
-    page(StatusCode::SERVICE_UNAVAILABLE, "Server busy", "The server is handling too many requests. This page retries every few seconds.", Some(5))
+    page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Server busy",
+        "The server is handling too many requests. This page retries every few seconds.",
+        Some(5),
+    )
 }
 
 pub fn ended() -> Response<Body> {
@@ -163,17 +163,13 @@ pub fn offline_signed_in() -> Response<Body> {
 }
 
 pub fn app_not_running(port: u16) -> Response<Body> {
-    let message = format!("Nothing is listening on port {port} in the sandbox yet. This page retries every few seconds.");
+    let message =
+        format!("Nothing is listening on port {port} in the sandbox yet. This page retries every few seconds.");
     page(StatusCode::BAD_GATEWAY, "App not running", &message, Some(5))
 }
 
 pub fn bad_gateway() -> Response<Body> {
-    page(
-        StatusCode::BAD_GATEWAY,
-        "Bad gateway",
-        "The app closed the connection without a valid response.",
-        None,
-    )
+    page(StatusCode::BAD_GATEWAY, "Bad gateway", "The app closed the connection without a valid response.", None)
 }
 
 pub fn rate_limited() -> Response<Body> {

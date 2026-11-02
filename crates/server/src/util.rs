@@ -50,12 +50,7 @@ pub fn request_host<B>(req: &Request<B>) -> Option<String> {
         .uri()
         .authority()
         .map(|a| a.host().to_string())
-        .or_else(|| {
-            req.headers()
-                .get(http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })?;
+        .or_else(|| req.headers().get(http::header::HOST).and_then(|v| v.to_str().ok()).map(|s| s.to_string()))?;
     Some(strip_port(&raw).to_ascii_lowercase())
 }
 
@@ -69,7 +64,7 @@ pub fn strip_port(host: &str) -> &str {
     }
 }
 
-pub fn header_str<'a>(value: Option<&'a HeaderValue>) -> Option<&'a str> {
+pub fn header_str(value: Option<&HeaderValue>) -> Option<&str> {
     value.and_then(|v| v.to_str().ok())
 }
 
@@ -113,11 +108,7 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<()
 
 /// Recursively chown a path to `user:group` via `chown -R` (setup/CLI only, runs as root).
 pub fn chown_recursive(path: &Path, owner: &str) -> anyhow::Result<()> {
-    let status = std::process::Command::new("chown")
-        .arg("-R")
-        .arg(format!("{owner}:{owner}"))
-        .arg(path)
-        .status()?;
+    let status = std::process::Command::new("chown").arg("-R").arg(format!("{owner}:{owner}")).arg(path).status()?;
     anyhow::ensure!(status.success(), "chown -R {owner} {} failed", path.display());
     Ok(())
 }

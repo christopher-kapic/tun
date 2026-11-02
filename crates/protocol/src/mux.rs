@@ -121,7 +121,8 @@ where
     let mut opening: VecDeque<oneshot::Sender<io::Result<Stream>>> = VecDeque::new();
     let mut closing: Option<oneshot::Sender<()>> = None;
     let mut cmds_done = false;
-    std::future::poll_fn(|cx| step(cx, &mut conn, &mut cmds, &mut cmds_done, &inbound, &mut opening, &mut closing)).await;
+    std::future::poll_fn(|cx| step(cx, &mut conn, &mut cmds, &mut cmds_done, &inbound, &mut opening, &mut closing))
+        .await;
     if let Some(done) = closing {
         let _ = done.send(());
     }
@@ -253,7 +254,8 @@ mod tests {
         use futures_util::StreamExt;
         let (a, b) = tokio::io::duplex(1 << 20);
         // The configuration clients before the rust-yamux switch used.
-        let old_cfg = tokio_yamux::Config { max_stream_window_size: 256 * 1024, enable_keepalive: false, ..Default::default() };
+        let old_cfg =
+            tokio_yamux::Config { max_stream_window_size: 256 * 1024, enable_keepalive: false, ..Default::default() };
         let mut old = tokio_yamux::Session::new_client(a, old_cfg);
         let mut old_ctl = old.control();
         tokio::spawn(async move { while old.next().await.is_some() {} });

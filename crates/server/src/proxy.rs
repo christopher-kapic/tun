@@ -12,6 +12,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use bytes::Bytes;
+use cockpit_tunnel_protocol::mux::Stream as StreamHandle;
 use cockpit_tunnel_protocol::{encode_preamble, STREAM_OK, STREAM_REFUSED};
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use http::response::Parts;
@@ -22,7 +23,6 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use cockpit_tunnel_protocol::mux::Stream as StreamHandle;
 
 use crate::db::{HostHeaderMode, TunnelRow};
 use crate::headers::{self, ResponseCtx};
@@ -81,7 +81,17 @@ pub async fn forward(
 
     let public_host = state.preview_host(port, &tunnel.id);
     let (parts, body) = req.into_parts();
-    let headers = origin_request_headers(parts.headers, state, tunnel, port, &public_host, cookie, peer, ws, inject_subject.is_some());
+    let headers = origin_request_headers(
+        parts.headers,
+        state,
+        tunnel,
+        port,
+        &public_host,
+        cookie,
+        peer,
+        ws,
+        inject_subject.is_some(),
+    );
 
     let bytes = state.metrics.tunnel_bytes(&tunnel.id);
     let req_body = if ws.is_some() {
@@ -310,17 +320,17 @@ fn is_navigation(headers: &HeaderMap) -> bool {
 
 /// Non-empty, uncompressed `text/html` with a body.
 fn injectable(parts: &Parts) -> bool {
-    if parts.status == StatusCode::NO_CONTENT || parts.status == StatusCode::NOT_MODIFIED || parts.status.is_informational() {
+    if parts.status == StatusCode::NO_CONTENT
+        || parts.status == StatusCode::NOT_MODIFIED
+        || parts.status.is_informational()
+    {
         return false;
     }
-    let html = header_str(parts.headers.get(header::CONTENT_TYPE)).is_some_and(|ct| {
-        ct.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("text/html")
+    let html = header_str(parts.headers.get(header::CONTENT_TYPE))
+        .is_some_and(|ct| ct.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("text/html"));
+    let identity = parts.headers.get_all(header::CONTENT_ENCODING).iter().all(|v| {
+        v.to_str().is_ok_and(|e| e.split(',').all(|t| t.trim().is_empty() || t.trim().eq_ignore_ascii_case("identity")))
     });
-    let identity = parts
-        .headers
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .all(|v| v.to_str().is_ok_and(|e| e.split(',').all(|t| t.trim().is_empty() || t.trim().eq_ignore_ascii_case("identity"))));
     let empty = header_str(parts.headers.get(header::CONTENT_LENGTH)).is_some_and(|l| l.trim() == "0");
     html && identity && !empty
 }

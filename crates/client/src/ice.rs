@@ -151,7 +151,11 @@ async fn answer(daemon: &Daemon, mut sock: TcpStream, port: u16) -> std::io::Res
         // hostname it controls that resolves to 127.0.0.1.
         ("403 Forbidden", r#"{"error":"forbidden"}"#.to_string())
     } else if method == "GET" && path == "/ice" && !token_matches(&head, &daemon.ice_token) {
-        ("401 Unauthorized", r#"{"error":"send Authorization: Bearer $COCKPIT_ICE_TOKEN (from `cockpit-preview ice --format env`)"}"#.to_string())
+        (
+            "401 Unauthorized",
+            r#"{"error":"send Authorization: Bearer $COCKPIT_ICE_TOKEN (from `cockpit-preview ice --format env`)"}"#
+                .to_string(),
+        )
     } else if method == "GET" && path == "/ice" {
         match daemon.current_ice() {
             Some(ice) => ("200 OK", serde_json::to_string(&ice).unwrap_or_default()),

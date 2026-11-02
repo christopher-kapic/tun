@@ -59,14 +59,8 @@ impl Route53 {
         let path = format!("/2013-04-01/hostedzone/{}/rrset/", self.hosted_zone_id);
         let now = time::OffsetDateTime::now_utc();
         let (amz_date, date) = amz_dates(now);
-        let authorization = sign(
-            &self.access_key_id,
-            &self.secret_access_key,
-            &path,
-            &amz_date,
-            &date,
-            body.as_bytes(),
-        );
+        let authorization =
+            sign(&self.access_key_id, &self.secret_access_key, &path, &amz_date, &date, body.as_bytes());
 
         let resp = self
             .http
@@ -133,10 +127,8 @@ fn sha256_hex(data: &[u8]) -> String {
 /// SigV4 `Authorization` header for `POST <path>` with headers host + x-amz-date.
 fn sign(access_key_id: &str, secret: &str, path: &str, amz_date: &str, date: &str, body: &[u8]) -> String {
     let signed_headers = "host;x-amz-date";
-    let canonical_request = format!(
-        "POST\n{path}\n\nhost:{HOST}\nx-amz-date:{amz_date}\n\n{signed_headers}\n{}",
-        sha256_hex(body)
-    );
+    let canonical_request =
+        format!("POST\n{path}\n\nhost:{HOST}\nx-amz-date:{amz_date}\n\n{signed_headers}\n{}", sha256_hex(body));
     let scope = format!("{date}/{REGION}/{SERVICE}/aws4_request");
     let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", sha256_hex(canonical_request.as_bytes()));
 
@@ -146,7 +138,9 @@ fn sign(access_key_id: &str, secret: &str, path: &str, amz_date: &str, date: &st
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
     let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
-    format!("AWS4-HMAC-SHA256 Credential={access_key_id}/{scope}, SignedHeaders={signed_headers}, Signature={signature}")
+    format!(
+        "AWS4-HMAC-SHA256 Credential={access_key_id}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    )
 }
 
 #[cfg(test)]

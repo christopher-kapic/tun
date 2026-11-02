@@ -82,9 +82,7 @@ pub async fn token_rotate(config_path: &Path) -> anyhow::Result<()> {
     if mode.systemctl_ok(&["try-restart", SERVICE_NAME]) {
         println!("Restarted {SERVICE_NAME} (if it was running); the old token no longer works.");
     } else {
-        eprintln!(
-            "warning: restarting {SERVICE_NAME} failed; restart the service so the new token takes effect"
-        );
+        eprintln!("warning: restarting {SERVICE_NAME} failed; restart the service so the new token takes effect");
     }
 
     println!("New admin API token (shown once):");
@@ -155,7 +153,10 @@ pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()> {
     let cfg = Config::load(config_path)?;
     let status = tls::cert_status(&cfg);
     if let (false, CertStatus::Valid { not_after }) = (force, status) {
-        println!("Certificate is valid until {}; nothing to do (use --force to renew anyway).", describe_time(not_after));
+        println!(
+            "Certificate is valid until {}; nothing to do (use --force to renew anyway).",
+            describe_time(not_after)
+        );
         return Ok(());
     }
     println!("Issuing a certificate for {} ...", cfg.cert_names().join(", "));

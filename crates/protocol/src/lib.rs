@@ -91,7 +91,9 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ice: Option<IceConfig>,
     },
-    Close { reason: CloseReason },
+    Close {
+        reason: CloseReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,9 +143,7 @@ where
     if n > MAX_CONTROL_LINE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "control line too long"));
     }
-    serde_json::from_str(buf.trim_end())
-        .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    serde_json::from_str(buf.trim_end()).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 pub async fn write_json_line<W, T>(writer: &mut W, msg: &T) -> io::Result<()>

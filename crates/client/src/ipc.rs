@@ -44,7 +44,9 @@ pub enum Request {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Status { status: Status },
+    Status {
+        status: Status,
+    },
     Ice {
         ice: IceConfig,
         ice_file: String,
@@ -54,7 +56,9 @@ pub enum Response {
         #[serde(default)]
         ice_token: Option<String>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +222,7 @@ pub async fn ensure_daemon(
         return Ok(Reach::Stopped);
     }
     // Fail here rather than in the detached daemon, where the error would only reach the log.
-    let persisted_server = state.as_ref().filter(|p| !new_token(*p)).map(|p| p.server.as_str());
+    let persisted_server = state.as_ref().filter(|p| !new_token(p)).map(|p| p.server.as_str());
     let server = server.map(str::to_string).or_else(|| env_nonempty(ENV_SERVER));
     resolve_server(server.as_deref(), persisted_server)?;
 

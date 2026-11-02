@@ -36,12 +36,7 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn tunnel_bytes(&self, tunnel_id: &str) -> Arc<TunnelBytes> {
-        self.per_tunnel
-            .lock()
-            .expect("metrics lock")
-            .entry(tunnel_id.to_string())
-            .or_default()
-            .clone()
+        self.per_tunnel.lock().expect("metrics lock").entry(tunnel_id.to_string()).or_default().clone()
     }
 
     pub fn forget_tunnel(&self, tunnel_id: &str) {

@@ -74,11 +74,7 @@ impl Cloudflare {
     }
 
     async fn call<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder, what: &str) -> anyhow::Result<T> {
-        let resp = req
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .with_context(|| format!("Cloudflare {what}"))?;
+        let resp = req.bearer_auth(&self.token).send().await.with_context(|| format!("Cloudflare {what}"))?;
         let status = resp.status();
         let body = resp.text().await.with_context(|| format!("Cloudflare {what}"))?;
         let env: Envelope<T> = match serde_json::from_str(&body) {
@@ -109,9 +105,11 @@ impl Cloudflare {
 
     async fn find(&self, zone_id: &str, fqdn: &str, rtype: &str) -> anyhow::Result<Vec<DnsRecord>> {
         self.call(
-            self.http
-                .get(format!("{API}/zones/{zone_id}/dns_records"))
-                .query(&[("type", rtype), ("name", fqdn), ("per_page", "100")]),
+            self.http.get(format!("{API}/zones/{zone_id}/dns_records")).query(&[
+                ("type", rtype),
+                ("name", fqdn),
+                ("per_page", "100"),
+            ]),
             "record lookup",
         )
         .await
@@ -148,9 +146,8 @@ impl Cloudflare {
     pub async fn create_txt(&self, fqdn: &str, value: &str) -> anyhow::Result<RecordRef> {
         let zone_id = self.zone_id().await?;
         let body = json!({ "type": "TXT", "name": fqdn, "content": value, "ttl": TTL });
-        let rec: DnsRecord = self
-            .call(self.http.post(format!("{API}/zones/{zone_id}/dns_records")).json(&body), "TXT create")
-            .await?;
+        let rec: DnsRecord =
+            self.call(self.http.post(format!("{API}/zones/{zone_id}/dns_records")).json(&body), "TXT create").await?;
         Ok(RecordRef { name: fqdn.to_string(), rtype: "TXT".into(), value: value.to_string(), id: Some(rec.id) })
     }
 
@@ -163,9 +160,8 @@ impl Cloudflare {
     }
 
     async fn delete_id(&self, zone_id: &str, id: &str) -> anyhow::Result<()> {
-        let _: serde_json::Value = self
-            .call(self.http.delete(format!("{API}/zones/{zone_id}/dns_records/{id}")), "record delete")
-            .await?;
+        let _: serde_json::Value =
+            self.call(self.http.delete(format!("{API}/zones/{zone_id}/dns_records/{id}")), "record delete").await?;
         Ok(())
     }
 }

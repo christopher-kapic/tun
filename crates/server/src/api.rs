@@ -12,7 +12,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
 use cockpit_tunnel_protocol::{
-    CloseReason, IceServer, ACCESS_TOKEN_PREFIX, ADMIN_TOKEN_PREFIX, CLIENT_TOKEN_PREFIX, ENROLL_CODE_PREFIX, TUNNEL_TOKEN_PREFIX,
+    CloseReason, IceServer, ACCESS_TOKEN_PREFIX, ADMIN_TOKEN_PREFIX, CLIENT_TOKEN_PREFIX, ENROLL_CODE_PREFIX,
+    TUNNEL_TOKEN_PREFIX,
 };
 use http::request::Parts;
 use http::{header, HeaderValue, Request, Response, StatusCode};
@@ -25,9 +26,11 @@ use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 
 use crate::clients;
-use crate::db::{Access, AccessMode, ClientRow, DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow};
-use crate::password;
+use crate::db::{
+    Access, AccessMode, ClientRow, DeleteOutcome, HostHeaderMode, NewAccessLink, NewTunnel, TunnelPatch, TunnelRow,
+};
 use crate::ice;
+use crate::password;
 use crate::state::AppState;
 use crate::tokens::{self, now};
 use crate::util::{full, json_response, Body};
@@ -56,9 +59,8 @@ pub async fn handle(state: Arc<AppState>, req: Request<Incoming>) -> Response<Bo
         Ok(collected) => Response::from_parts(parts, full(collected.to_bytes())),
         Err(e) => {
             tracing::error!(error = %e, "collecting api response failed");
-            let body = ErrorBody {
-                error: ErrorDetail { code: "internal".into(), message: "internal server error".into() },
-            };
+            let body =
+                ErrorBody { error: ErrorDetail { code: "internal".into(), message: "internal server error".into() } };
             json_response(StatusCode::INTERNAL_SERVER_ERROR, &body)
         }
     }
@@ -754,7 +756,8 @@ async fn delete_access_link(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     if matches!(caller, Caller::Client { .. }) {
-        let tunnel = state.db.access_link_tunnel(id.clone()).await?.ok_or_else(|| ApiError::not_found("access link"))?;
+        let tunnel =
+            state.db.access_link_tunnel(id.clone()).await?.ok_or_else(|| ApiError::not_found("access link"))?;
         if find_tunnel(&state, &caller, &tunnel).await.is_err() {
             return Err(ApiError::not_found("access link"));
         }
@@ -876,7 +879,13 @@ pub struct EnrollResponse {
 
 impl From<ClientRow> for ClientView {
     fn from(c: ClientRow) -> Self {
-        Self { name: c.name, enrolled: c.enrolled, created_at: c.created_at, last_used_at: c.last_used_at, tunnels: c.tunnels }
+        Self {
+            name: c.name,
+            enrolled: c.enrolled,
+            created_at: c.created_at,
+            last_used_at: c.last_used_at,
+            tunnels: c.tunnels,
+        }
     }
 }
 
@@ -892,7 +901,15 @@ async fn create_client(
     ApiJson(req): ApiJson<CreateClientRequest>,
 ) -> ApiResult<(StatusCode, Json<CreateClientResponse>)> {
     match clients::add(&state.db, &state.config, &req.name).await {
-        Ok(e) => Ok((StatusCode::CREATED, Json(CreateClientResponse { name: e.name, login_code: e.login_code, login_command: e.login_command, expires_at: e.expires_at }))),
+        Ok(e) => Ok((
+            StatusCode::CREATED,
+            Json(CreateClientResponse {
+                name: e.name,
+                login_code: e.login_code,
+                login_command: e.login_command,
+                expires_at: e.expires_at,
+            }),
+        )),
         Err(clients::AddError::Invalid(m)) => Err(ApiError::validation(m)),
         Err(clients::AddError::Taken) => {
             Err(ApiError::new(StatusCode::CONFLICT, "client_exists", "a client with this name exists; delete it first"))
@@ -942,7 +959,11 @@ async fn enroll_client(
 ) -> ApiResult<Json<EnrollResponse>> {
     if let Some(axum::Extension(PeerAddr(addr))) = peer {
         if !state.access_limiter.check(addr.ip()) {
-            return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "too many attempts; wait a minute"));
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "too many attempts; wait a minute",
+            ));
         }
     }
     let code = req.code.trim();
@@ -1034,7 +1055,11 @@ async fn active_tunnel(state: &AppState, caller: &Caller, id: &str) -> ApiResult
         Ok(row) if row.is_expired() => Err(ApiError::expired()),
         Ok(row) => Ok(row),
         // Tombstones carry no owner, so only the admin learns that an id ended.
-        Err(e) if e.status == StatusCode::NOT_FOUND && tokens::is_valid_tunnel_id(id) && matches!(caller, Caller::Admin) => {
+        Err(e)
+            if e.status == StatusCode::NOT_FOUND
+                && tokens::is_valid_tunnel_id(id)
+                && matches!(caller, Caller::Admin) =>
+        {
             if state.db.is_tombstoned(id.to_string()).await? {
                 Err(ApiError::expired())
             } else {

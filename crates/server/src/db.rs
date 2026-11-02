@@ -96,10 +96,8 @@ CREATE TABLE IF NOT EXISTS client_enrollments (
 
 /// Columns added after the first release, as `(table, column, definition)`.
 /// `CREATE TABLE IF NOT EXISTS` never alters an existing table.
-const COLUMNS_ADDED: &[(&str, &str, &str)] = &[
-    ("gate_grant_links", "expires_at", "INTEGER"),
-    ("gate_grant_logins", "expires_at", "INTEGER"),
-];
+const COLUMNS_ADDED: &[(&str, &str, &str)] =
+    &[("gate_grant_links", "expires_at", "INTEGER"), ("gate_grant_logins", "expires_at", "INTEGER")];
 
 /// Indexes that depend on added columns, created after migration.
 const INDEXES: &str = "
@@ -386,8 +384,7 @@ impl Db {
 
     pub async fn get_tunnel(&self, id: String) -> anyhow::Result<Option<TunnelRow>> {
         self.call(move |c| {
-            Ok(c.query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row)
-                .optional()?)
+            Ok(c.query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row).optional()?)
         })
         .await
     }
@@ -395,9 +392,8 @@ impl Db {
     /// Live row (possibly expired; callers check `is_expired()`), tombstone, or neither.
     pub async fn lookup_tunnel(&self, id: String) -> anyhow::Result<TunnelLookup> {
         self.call(move |c| {
-            let row = c
-                .query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row)
-                .optional()?;
+            let row =
+                c.query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row).optional()?;
             if let Some(row) = row {
                 return Ok(TunnelLookup::Live(row));
             }
@@ -452,9 +448,8 @@ impl Db {
                     revoke_login_grants(&tx, &id)?;
                 }
             }
-            let row = tx
-                .query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row)
-                .optional()?;
+            let row =
+                tx.query_row(&format!("{TUNNEL_SELECT} WHERE id = ?1"), params![id], tunnel_from_row).optional()?;
             tx.commit()?;
             Ok(row)
         })
@@ -489,14 +484,8 @@ impl Db {
                 tx.commit()?;
                 return Ok(if tomb > 0 { DeleteOutcome::AlreadyTombstoned } else { DeleteOutcome::NotFound });
             }
-            tx.execute(
-                "INSERT OR REPLACE INTO tombstones (id, deleted_at) VALUES (?1, ?2)",
-                params![id, now()],
-            )?;
-            tx.execute(
-                "DELETE FROM gate_sessions WHERE id_hash NOT IN (SELECT session_hash FROM gate_grants)",
-                [],
-            )?;
+            tx.execute("INSERT OR REPLACE INTO tombstones (id, deleted_at) VALUES (?1, ?2)", params![id, now()])?;
+            tx.execute("DELETE FROM gate_sessions WHERE id_hash NOT IN (SELECT session_hash FROM gate_grants)", [])?;
             tx.commit()?;
             Ok(DeleteOutcome::Deleted)
         })
@@ -541,10 +530,7 @@ impl Db {
                 params![id],
             )?;
             let n = tx.execute("DELETE FROM access_links WHERE id = ?1", params![id])?;
-            tx.execute(
-                "DELETE FROM gate_sessions WHERE id_hash NOT IN (SELECT session_hash FROM gate_grants)",
-                [],
-            )?;
+            tx.execute("DELETE FROM gate_sessions WHERE id_hash NOT IN (SELECT session_hash FROM gate_grants)", [])?;
             tx.commit()?;
             Ok(n > 0)
         })
@@ -695,7 +681,8 @@ impl Db {
         self.call(move |c| {
             let t = now();
             let tx = c.transaction()?;
-            let taken: i64 = tx.query_row("SELECT COUNT(*) FROM clients WHERE name = ?1", params![name], |r| r.get(0))?;
+            let taken: i64 =
+                tx.query_row("SELECT COUNT(*) FROM clients WHERE name = ?1", params![name], |r| r.get(0))?;
             if taken > 0 {
                 return Ok(None);
             }
@@ -795,9 +782,8 @@ impl Db {
         self.call(move |c| {
             let t = now();
             let tx = c.transaction()?;
-            let id: Option<String> = tx
-                .query_row("SELECT id FROM clients WHERE name = ?1", params![name], |r| r.get(0))
-                .optional()?;
+            let id: Option<String> =
+                tx.query_row("SELECT id FROM clients WHERE name = ?1", params![name], |r| r.get(0)).optional()?;
             let Some(id) = id else {
                 return Ok(None);
             };
@@ -806,10 +792,7 @@ impl Db {
                 let rows = stmt.query_map(params![id], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
                 rows
             };
-            tx.execute(
-                "UPDATE tunnels SET expires_at = MIN(expires_at, ?2) WHERE client_id = ?1",
-                params![id, t - 1],
-            )?;
+            tx.execute("UPDATE tunnels SET expires_at = MIN(expires_at, ?2) WHERE client_id = ?1", params![id, t - 1])?;
             tx.execute("DELETE FROM clients WHERE id = ?1", params![id])?;
             tx.commit()?;
             Ok(Some(tunnels))
@@ -1029,7 +1012,6 @@ fn tunnel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TunnelRow> {
         client_id: r.get(12)?,
     })
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -54,13 +54,9 @@ pub fn configure(cfg: &Config) -> anyhow::Result<()> {
 }
 
 fn ufw_active() -> bool {
-    os::output("ufw", &["status"])
-        .map(|s| s.lines().any(|l| l.trim() == "Status: active"))
-        .unwrap_or(false)
+    os::output("ufw", &["status"]).map(|s| s.lines().any(|l| l.trim() == "Status: active")).unwrap_or(false)
 }
 
 fn firewalld_running() -> bool {
-    os::output("firewall-cmd", &["--state"])
-        .map(|s| s.trim() == "running")
-        .unwrap_or(false)
+    os::output("firewall-cmd", &["--state"]).map(|s| s.trim() == "running").unwrap_or(false)
 }

@@ -134,7 +134,14 @@ fn signed_in_offline(redirect: Response<Body>) -> Response<Body> {
     page
 }
 
-fn login_form(state: &AppState, status: StatusCode, port: u16, id: &str, next: &str, error: Option<&str>) -> Response<Body> {
+fn login_form(
+    state: &AppState,
+    status: StatusCode,
+    port: u16,
+    id: &str,
+    next: &str,
+    error: Option<&str>,
+) -> Response<Body> {
     let to = format!("{port}-{id}");
     let origin = preview_origin(state, port, id);
     let frame_sources = headers::frame_sources(&state.config.frame_ancestors);
@@ -220,7 +227,10 @@ mod tests {
 
     #[test]
     fn urls() {
-        assert_eq!(access_url("z.example", ID, Some(5173), "ctacc_t"), "https://z.example/__access/5173-abcdefghij/ctacc_t");
+        assert_eq!(
+            access_url("z.example", ID, Some(5173), "ctacc_t"),
+            "https://z.example/__access/5173-abcdefghij/ctacc_t"
+        );
         assert_eq!(access_url("z.example", ID, None, "ctacc_t"), "https://z.example/__access/abcdefghij/ctacc_t");
         assert_eq!(
             login_url("z.example", "3000-abcdefghij", "/a?b=1&c"),

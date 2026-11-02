@@ -47,17 +47,12 @@ impl Provider {
         anyhow::ensure!(!zone.is_empty(), "dns.zone is empty");
         let http = http_client()?;
         let token = || -> anyhow::Result<String> {
-            dns.api_token
-                .clone()
-                .filter(|t| !t.is_empty())
-                .context("dns.api_token is required for this DNS provider")
+            dns.api_token.clone().filter(|t| !t.is_empty()).context("dns.api_token is required for this DNS provider")
         };
         Ok(match dns.provider {
             DnsProviderKind::Cloudflare => Self::Cloudflare(cloudflare::Cloudflare::new(http, token()?, zone)),
             DnsProviderKind::Hetzner => Self::Hetzner(hetzner::Hetzner::new(http, token()?, zone)),
-            DnsProviderKind::Digitalocean => {
-                Self::DigitalOcean(digitalocean::DigitalOcean::new(http, token()?, zone))
-            }
+            DnsProviderKind::Digitalocean => Self::DigitalOcean(digitalocean::DigitalOcean::new(http, token()?, zone)),
             DnsProviderKind::Route53 => {
                 let key_id = dns
                     .aws_access_key_id
@@ -143,10 +138,7 @@ impl Provider {
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .user_agent(USER_AGENT)
-        .build()?)
+    Ok(reqwest::Client::builder().timeout(HTTP_TIMEOUT).user_agent(USER_AGENT).build()?)
 }
 
 /// Lowercase, no trailing dot.

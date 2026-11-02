@@ -48,10 +48,7 @@ async fn run_order(cfg: &Config, provider: &dns::Provider, created: &mut Vec<Rec
     let account = load_or_create_account(cfg).await?;
 
     let identifiers: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
-    let mut order = account
-        .new_order(&NewOrder { identifiers: &identifiers })
-        .await
-        .context("creating ACME order")?;
+    let mut order = account.new_order(&NewOrder { identifiers: &identifiers }).await.context("creating ACME order")?;
     tracing::info!(names = ?names, "ACME order created");
 
     let authorizations = order.authorizations().await.context("fetching ACME authorizations")?;
@@ -84,9 +81,7 @@ async fn run_order(cfg: &Config, provider: &dns::Provider, created: &mut Vec<Rec
 
     // Public resolvers are only a propagation hint; Let's Encrypt queries the
     // authoritative servers itself, so a slow resolver should not fail issuance.
-    let waits = pending
-        .iter()
-        .map(|(name, value, _)| dns::wait_for_txt(name, value, TXT_PROPAGATION_TIMEOUT));
+    let waits = pending.iter().map(|(name, value, _)| dns::wait_for_txt(name, value, TXT_PROPAGATION_TIMEOUT));
     for (res, (name, _, _)) in futures_util::future::join_all(waits).await.into_iter().zip(&pending) {
         if let Err(e) = res {
             tracing::warn!(error = %format!("{e:#}"), %name, "continuing without public-resolver confirmation");
@@ -113,32 +108,24 @@ async fn run_order(cfg: &Config, provider: &dns::Provider, created: &mut Vec<Rec
 }
 
 async fn load_or_create_account(cfg: &Config) -> anyhow::Result<Account> {
-    let directory = if cfg.acme.staging {
-        LetsEncrypt::Staging.url()
-    } else {
-        LetsEncrypt::Production.url()
-    };
+    let directory = if cfg.acme.staging { LetsEncrypt::Staging.url() } else { LetsEncrypt::Production.url() };
     let path = cfg.acme_account_path();
 
     if let Ok(raw) = std::fs::read(&path) {
         match serde_json::from_slice::<StoredAccount>(&raw) {
             Ok(stored) if stored.directory == directory => {
-                return Account::from_credentials(stored.credentials)
-                    .await
-                    .context("loading ACME account");
+                return Account::from_credentials(stored.credentials).await.context("loading ACME account");
             }
             Ok(_) => tracing::info!("ACME directory changed; registering a new account"),
-            Err(e) => tracing::warn!(error = %e, path = %path.display(), "unreadable ACME account file; registering a new account"),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "unreadable ACME account file; registering a new account")
+            }
         }
     }
 
     let contact = format!("mailto:{}", cfg.acme.email);
     let (account, credentials) = Account::create(
-        &NewAccount {
-            contact: &[contact.as_str()],
-            terms_of_service_agreed: true,
-            only_return_existing: false,
-        },
+        &NewAccount { contact: &[contact.as_str()], terms_of_service_agreed: true, only_return_existing: false },
         directory,
         None,
     )

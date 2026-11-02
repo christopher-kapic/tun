@@ -83,11 +83,8 @@ impl Mode {
 
     /// Run `systemctl`; `Err` carries its stderr.
     pub fn systemctl_run(self, args: &[&str]) -> anyhow::Result<()> {
-        let out = self
-            .systemctl()
-            .args(args)
-            .output()
-            .with_context(|| format!("running systemctl {}", args.join(" ")))?;
+        let out =
+            self.systemctl().args(args).output().with_context(|| format!("running systemctl {}", args.join(" ")))?;
         anyhow::ensure!(
             out.status.success(),
             "systemctl {}{} failed: {}",

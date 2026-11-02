@@ -97,11 +97,7 @@ pub async fn run(config_path: &Path, args: SetupArgs) -> anyhow::Result<()> {
         user_preflight(&args)?;
     }
 
-    let existing = if config_path.exists() {
-        Some(Config::load(config_path)?)
-    } else {
-        None
-    };
+    let existing = if config_path.exists() { Some(Config::load(config_path)?) } else { None };
     if existing.is_some() {
         println!("Reconfiguring from {} (Enter keeps each current value).", config_path.display());
     }
@@ -329,7 +325,13 @@ impl Ask {
         }
     }
 
-    fn secret(&self, file: Option<&Path>, flag_name: &str, question: &str, current: Option<&str>) -> anyhow::Result<String> {
+    fn secret(
+        &self,
+        file: Option<&Path>,
+        flag_name: &str,
+        question: &str,
+        current: Option<&str>,
+    ) -> anyhow::Result<String> {
         if let Some(path) = file {
             let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
             let v = raw.trim().to_string();
@@ -428,8 +430,13 @@ async fn ask_config(ask: &Ask, existing: Option<&Config>, args: &SetupArgs, mode
                 cfg.dns.aws_secret_access_key.as_deref(),
             )?);
             let zone_id = cfg.dns.route53_hosted_zone_id.clone().unwrap_or_default();
-            cfg.dns.route53_hosted_zone_id =
-                Some(ask.text(None, "route53-hosted-zone-id (config)", "Route53 hosted zone id", &zone_id, non_empty)?);
+            cfg.dns.route53_hosted_zone_id = Some(ask.text(
+                None,
+                "route53-hosted-zone-id (config)",
+                "Route53 hosted zone id",
+                &zone_id,
+                non_empty,
+            )?);
             cfg.dns.api_token = None;
         }
         _ => {
@@ -440,8 +447,12 @@ async fn ask_config(ask: &Ask, existing: Option<&Config>, args: &SetupArgs, mode
                 DnsProviderKind::Hetzner => "Hetzner DNS API token",
                 _ => "DigitalOcean API token (domain read/write)",
             };
-            cfg.dns.api_token =
-                Some(ask.secret(args.dns_token_file.as_deref(), "dns-token-file", hint, cfg.dns.api_token.as_deref())?);
+            cfg.dns.api_token = Some(ask.secret(
+                args.dns_token_file.as_deref(),
+                "dns-token-file",
+                hint,
+                cfg.dns.api_token.as_deref(),
+            )?);
             cfg.dns.aws_access_key_id = None;
             cfg.dns.aws_secret_access_key = None;
             cfg.dns.route53_hosted_zone_id = None;
@@ -598,9 +609,7 @@ fn parse_host(input: &str) -> Result<String, String> {
 
 fn parse_origin(input: &str) -> Result<String, String> {
     let trimmed = input.trim().trim_end_matches('/');
-    let rest = trimmed
-        .strip_prefix("https://")
-        .ok_or_else(|| "the origin must start with https://".to_string())?;
+    let rest = trimmed.strip_prefix("https://").ok_or_else(|| "the origin must start with https://".to_string())?;
     let (host, port) = match rest.rsplit_once(':') {
         Some((h, p)) => (h, Some(p)),
         None => (rest, None),
@@ -661,10 +670,7 @@ async fn detect_public_ips(existing: Option<&Config>) -> anyhow::Result<(Ipv4Add
 
 /// Bind the request to one address family so the echo service sees that family.
 async fn fetch_ip(url: &str, local: IpAddr) -> anyhow::Result<IpAddr> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .local_address(local)
-        .build()?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).local_address(local).build()?;
     let text = client.get(url).send().await?.error_for_status()?.text().await?;
     Ok(text.trim().parse()?)
 }
@@ -675,14 +681,7 @@ fn ensure_service_user(cfg: &Config) -> anyhow::Result<()> {
     }
     println!("Creating system user {SERVICE_USER}");
     let home = cfg.data_dir.to_string_lossy();
-    let mut args = vec![
-        "--system",
-        "--home-dir",
-        &*home,
-        "--no-create-home",
-        "--shell",
-        "/usr/sbin/nologin",
-    ];
+    let mut args = vec!["--system", "--home-dir", &*home, "--no-create-home", "--shell", "/usr/sbin/nologin"];
     if os::succeeds("getent", &["group", SERVICE_USER]) {
         args.extend(["--gid", SERVICE_USER]);
     } else {
@@ -784,7 +783,11 @@ async fn verify_dns(cfg: &Config, v4: Ipv4Addr, v6: Option<Ipv6Addr>) -> anyhow:
         }
     }
 
-    println!("Waiting for public DNS (polling every {}s, up to {} min)", DNS_POLL.as_secs(), DNS_TIMEOUT.as_secs() / 60);
+    println!(
+        "Waiting for public DNS (polling every {}s, up to {} min)",
+        DNS_POLL.as_secs(),
+        DNS_TIMEOUT.as_secs() / 60
+    );
     let deadline = Instant::now() + DNS_TIMEOUT;
     let mut warned_proxy = false;
     loop {
@@ -873,10 +876,7 @@ fn cert_is_staging(cfg: &Config) -> bool {
         return false;
     };
     match x509_parser::pem::parse_x509_pem(&pem) {
-        Ok((_, block)) => block
-            .parse_x509()
-            .map(|cert| cert.issuer().to_string().contains("STAGING"))
-            .unwrap_or(false),
+        Ok((_, block)) => block.parse_x509().map(|cert| cert.issuer().to_string().contains("STAGING")).unwrap_or(false),
         Err(_) => false,
     }
 }
@@ -962,7 +962,9 @@ fn finish(cfg: &Config, mode: Mode, new_token: Option<&str>) {
         None => {
             println!("The existing admin token was kept. Harness backend environment:");
             println!("  COCKPIT_TUNNEL_API=https://{}", cfg.api_host);
-            println!("  COCKPIT_TUNNEL_ADMIN_TOKEN=<existing token>  (lost it? run `cockpit-tunnel-server token rotate`)");
+            println!(
+                "  COCKPIT_TUNNEL_ADMIN_TOKEN=<existing token>  (lost it? run `cockpit-tunnel-server token rotate`)"
+            );
         }
     }
 }

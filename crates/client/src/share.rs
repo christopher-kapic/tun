@@ -59,7 +59,10 @@ pub async fn login(arg: Option<&str>) -> anyhow::Result<i32> {
 pub fn logout() -> anyhow::Result<i32> {
     let p = crate::login::path()?;
     match std::fs::remove_file(&p) {
-        Ok(()) => println!("Logged out (removed {}). Ask the server admin to `client delete` this machine to revoke its token.", p.display()),
+        Ok(()) => println!(
+            "Logged out (removed {}). Ask the server admin to `client delete` this machine to revoke its token.",
+            p.display()
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("Not logged in."),
         Err(e) => return Err(e).with_context(|| format!("removing {}", p.display())),
     }

@@ -34,11 +34,7 @@ impl DigitalOcean {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> anyhow::Result<reqwest::Response> {
-        let resp = req
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .with_context(|| format!("DigitalOcean {what}"))?;
+        let resp = req.bearer_auth(&self.token).send().await.with_context(|| format!("DigitalOcean {what}"))?;
         ensure_success(resp, &format!("DigitalOcean {what}")).await
     }
 

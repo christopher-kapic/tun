@@ -13,7 +13,8 @@ fn cpu() -> Duration {
     let ticks = std::fs::read_to_string("/proc/self/stat")
         .ok()
         .and_then(|s| {
-            let f: Vec<u64> = s.rsplit(") ").next()?.split(' ').skip(11).take(2).filter_map(|x| x.parse().ok()).collect();
+            let f: Vec<u64> =
+                s.rsplit(") ").next()?.split(' ').skip(11).take(2).filter_map(|x| x.parse().ok()).collect();
             Some(f.iter().sum::<u64>())
         })
         .unwrap_or(0);
@@ -71,6 +72,11 @@ async fn bulk() {
         total += t.await.unwrap();
     }
     let (cpu_s, wall) = ((cpu() - c0).as_secs_f64(), t0.elapsed().as_secs_f64());
-    println!("bulk: {} MiB in {:.2}s wall, {:.2}s CPU → {:.0} MiB per CPU-s", total >> 20, wall, cpu_s, (total >> 20) as f64 / cpu_s);
+    println!(
+        "bulk: {} MiB in {:.2}s wall, {:.2}s CPU → {:.0} MiB per CPU-s",
+        total >> 20,
+        wall,
+        cpu_s,
+        (total >> 20) as f64 / cpu_s
+    );
 }
-

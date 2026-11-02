@@ -115,9 +115,7 @@ fn error(status: StatusCode, code: &str, message: &str) -> Response<Body> {
 }
 
 async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded) -> anyhow::Result<()> {
-    let ws_config = WebSocketConfig::default()
-        .max_frame_size(Some(MAX_WS_FRAME))
-        .max_message_size(Some(MAX_WS_FRAME));
+    let ws_config = WebSocketConfig::default().max_frame_size(Some(MAX_WS_FRAME)).max_message_size(Some(MAX_WS_FRAME));
     let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(ws_config)).await;
     let (duplex, mut bridge) = ws_bridge::bridge(ws, PING_INTERVAL);
 

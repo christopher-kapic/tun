@@ -88,9 +88,7 @@ impl ResolvesServerCert for CertStore {
 }
 
 pub fn server_config(store: Arc<CertStore>) -> rustls::ServerConfig {
-    let mut config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(store);
+    let mut config = rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(store);
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     config
 }
@@ -142,9 +140,8 @@ pub fn cert_status(cfg: &Config) -> CertStatus {
         return CertStatus::Missing;
     }
 
-    let on_disk: Option<Vec<String>> = std::fs::read(dir.join(NAMES))
-        .ok()
-        .and_then(|raw| serde_json::from_slice(&raw).ok());
+    let on_disk: Option<Vec<String>> =
+        std::fs::read(dir.join(NAMES)).ok().and_then(|raw| serde_json::from_slice(&raw).ok());
     let mut on_disk = match on_disk {
         Some(n) => n,
         None => return CertStatus::NamesChanged,

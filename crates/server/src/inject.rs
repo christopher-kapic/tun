@@ -45,9 +45,11 @@ plan();
 /// The inline script body (without the `<script>` tags). The CSP hash covers
 /// exactly this text.
 pub fn script(ice: &IceConfig, turn_host: &str) -> String {
-    SCRIPT_TEMPLATE
-        .replacen("__COCKPIT_HOST__", &js_json(&turn_host.to_ascii_lowercase()), 1)
-        .replacen("__COCKPIT_CONFIG__", &js_json(ice), 1)
+    SCRIPT_TEMPLATE.replacen("__COCKPIT_HOST__", &js_json(&turn_host.to_ascii_lowercase()), 1).replacen(
+        "__COCKPIT_CONFIG__",
+        &js_json(ice),
+        1,
+    )
 }
 
 pub fn tag(script: &str) -> Bytes {
@@ -137,7 +139,9 @@ impl HttpBody for Injector {
                         this.buf.extend_from_slice(&data);
                         let at = match scan(&this.buf) {
                             Scan::Found(at) => at,
-                            Scan::NeedMore { html_end } if this.buf.len() >= SCAN_LIMIT => fallback(&this.buf, html_end),
+                            Scan::NeedMore { html_end } if this.buf.len() >= SCAN_LIMIT => {
+                                fallback(&this.buf, html_end)
+                            }
                             Scan::NeedMore { .. } => continue,
                         };
                         return Poll::Ready(Some(Ok(Frame::data(this.emit_with_tag(at)))));
@@ -328,7 +332,11 @@ mod tests {
     #[test]
     fn script_is_inert_html() {
         let ice = IceConfig {
-            ice_servers: vec![IceServer { urls: vec!["stun:t.example.com:3478".into()], username: Some("</script>".into()), credential: None }],
+            ice_servers: vec![IceServer {
+                urls: vec!["stun:t.example.com:3478".into()],
+                username: Some("</script>".into()),
+                credential: None,
+            }],
             expires_at: 1,
             ttl_s: 1,
         };
@@ -340,10 +348,8 @@ mod tests {
 
     #[tokio::test]
     async fn streams_split_head() {
-        let chunks: Vec<Result<Frame<Bytes>, BoxError>> = ["<html><he", "ad>rest", " more"]
-            .into_iter()
-            .map(|c| Ok(Frame::data(Bytes::from(c))))
-            .collect();
+        let chunks: Vec<Result<Frame<Bytes>, BoxError>> =
+            ["<html><he", "ad>rest", " more"].into_iter().map(|c| Ok(Frame::data(Bytes::from(c)))).collect();
         let inner: Body = StreamBody::new(futures_util::stream::iter(chunks)).boxed();
         let out = Injector::new(inner, Bytes::from_static(b"<script></script>")).collect().await.unwrap().to_bytes();
         assert_eq!(&out[..], b"<html><head><script></script>rest more");

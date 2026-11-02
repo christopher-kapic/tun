@@ -412,7 +412,10 @@ mod tests {
             vec!["script-src 'self'", "frame-ancestors 'self' https://app.example.com"]
         );
         // An app policy with framing is rewritten in place, not duplicated.
-        assert_eq!(csp_after(Some("frame-ancestors 'none'"), &APP_LIST), vec!["frame-ancestors 'self' https://app.example.com"]);
+        assert_eq!(
+            csp_after(Some("frame-ancestors 'none'"), &APP_LIST),
+            vec!["frame-ancestors 'self' https://app.example.com"]
+        );
     }
 
     const ZONE: &str = "previews.example.com";

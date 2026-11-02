@@ -84,7 +84,9 @@ mod tests {
     async fn conn() -> SendRequest<Body> {
         let (a, b) = tokio::io::duplex(1 << 16);
         tokio::spawn(async move {
-            let svc = service_fn(|_req| async { Ok::<_, std::convert::Infallible>(http::Response::new(crate::util::full("ok"))) });
+            let svc = service_fn(|_req| async {
+                Ok::<_, std::convert::Infallible>(http::Response::new(crate::util::full("ok")))
+            });
             let _ = server_http1::Builder::new().serve_connection(TokioIo::new(b), svc).await;
         });
         let (sender, c) = hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(a)).await.unwrap();

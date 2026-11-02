@@ -1,7 +1,7 @@
 mod acme;
 mod api;
-mod commands;
 mod clients;
+mod commands;
 mod config;
 mod control;
 mod db;

@@ -153,12 +153,8 @@ impl Daemon {
         if g.generation != link.generation {
             return None;
         }
-        let accepted: BTreeSet<u16> = welcome
-            .ports
-            .iter()
-            .copied()
-            .filter(|p| hello.contains(p) && g.persisted.ports.contains(p))
-            .collect();
+        let accepted: BTreeSet<u16> =
+            welcome.ports.iter().copied().filter(|p| hello.contains(p) && g.persisted.ports.contains(p)).collect();
         // The server keeps a prefix when over max_ports; drop the rest locally.
         let dropped: Vec<u16> = hello.iter().copied().filter(|p| !welcome.ports.contains(p)).collect();
         g.persisted.ports.retain(|p| !dropped.contains(p));
@@ -456,8 +452,7 @@ pub async fn run() -> anyhow::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("removing stale {}", paths.socket.display())),
     }
-    let listener =
-        UnixListener::bind(&paths.socket).with_context(|| format!("binding {}", paths.socket.display()))?;
+    let listener = UnixListener::bind(&paths.socket).with_context(|| format!("binding {}", paths.socket.display()))?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
 
     let ice_file = paths::ice_file(&paths.dir);

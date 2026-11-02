@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
+use cockpit_tunnel_protocol::mux::{self, Stream as StreamHandle};
 use cockpit_tunnel_protocol::{
-    decode_preamble, read_json_line, write_json_line, ws_bridge, ClientMsg, CloseReason, ServerMsg,
-    CONNECT_PATH, PING_INTERVAL, PROTOCOL_VERSION, STREAM_NOT_EXPOSED, STREAM_OK, STREAM_REFUSED,
+    decode_preamble, read_json_line, write_json_line, ws_bridge, ClientMsg, CloseReason, ServerMsg, CONNECT_PATH,
+    PING_INTERVAL, PROTOCOL_VERSION, STREAM_NOT_EXPOSED, STREAM_OK, STREAM_REFUSED,
 };
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -20,7 +21,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Error as WsError;
-use cockpit_tunnel_protocol::mux::{self, Stream as StreamHandle};
 use tracing::{debug, info, warn};
 
 use crate::daemon::{lock_poisoned, Daemon, Link, Pending, Reply, Welcome};

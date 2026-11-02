@@ -36,10 +36,7 @@ const DENIED_PEERS: &[&str] = &[
 /// The account the distro's coturn service runs as (`turnserver` on
 /// Debian/Ubuntu, `coturn` on Fedora/RHEL).
 pub fn detect_coturn_user() -> Option<String> {
-    ["turnserver", "coturn"]
-        .into_iter()
-        .find(|u| os::succeeds("id", &["-u", *u]))
-        .map(str::to_string)
+    ["turnserver", "coturn"].into_iter().find(|u| os::succeeds("id", &["-u", *u])).map(str::to_string)
 }
 
 fn config_path(family: Family) -> &'static str {
@@ -57,13 +54,14 @@ pub fn configure(cfg: &Config, os: &mut Os) -> anyhow::Result<()> {
 
     os.ensure_epel()?;
     os.install(&["coturn"])?;
-    let user = detect_coturn_user().context("coturn is installed but neither a 'turnserver' nor a 'coturn' user exists")?;
+    let user =
+        detect_coturn_user().context("coturn is installed but neither a 'turnserver' nor a 'coturn' user exists")?;
 
     let (listen, private) = listen_address(public);
     let rendered = render(cfg, public, listen, private);
     let path = Path::new(config_path(os.family));
-    let mut changed = write_if_changed(path, rendered.as_bytes(), 0o640)
-        .with_context(|| format!("writing {}", path.display()))?;
+    let mut changed =
+        write_if_changed(path, rendered.as_bytes(), 0o640).with_context(|| format!("writing {}", path.display()))?;
     // It holds the static auth secret: readable by coturn, nobody else.
     let owner = format!("root:{user}");
     os::run("chown", &[owner.as_str(), &*path.to_string_lossy()])?;
@@ -92,11 +90,9 @@ pub fn configure(cfg: &Config, os: &mut Os) -> anyhow::Result<()> {
 /// WebRTC was turned off: stop a coturn that this wizard configured. A coturn
 /// configured by someone else is left alone.
 pub fn disable_if_managed() -> anyhow::Result<()> {
-    let managed = [APT_CONFIG, DNF_CONFIG].iter().any(|p| {
-        std::fs::read_to_string(p)
-            .map(|s| s.starts_with(MARKER))
-            .unwrap_or(false)
-    });
+    let managed = [APT_CONFIG, DNF_CONFIG]
+        .iter()
+        .any(|p| std::fs::read_to_string(p).map(|s| s.starts_with(MARKER)).unwrap_or(false));
     if managed && os::succeeds("systemctl", &["is-enabled", "--quiet", SERVICE]) {
         println!("WebRTC disabled: stopping coturn");
         os::run("systemctl", &["disable", "--now", SERVICE])?;

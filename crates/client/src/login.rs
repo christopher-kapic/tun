@@ -175,7 +175,11 @@ impl<'a> Api<'a> {
     }
 
     pub async fn set_access(&self, id: &str, access: &Value) -> anyhow::Result<()> {
-        let resp = self.req(reqwest::Method::PATCH, &format!("/v1/tunnels/{id}")).json(&json!({ "access": access })).send().await?;
+        let resp = self
+            .req(reqwest::Method::PATCH, &format!("/v1/tunnels/{id}"))
+            .json(&json!({ "access": access }))
+            .send()
+            .await?;
         decode::<Value>(resp, "changing access").await.map(|_| ())
     }
 
@@ -186,7 +190,8 @@ impl<'a> Api<'a> {
             url: String,
         }
         let body = json!({ "ttl_s": ttl_s, "single_use": single_use, "port": port });
-        let resp = self.req(reqwest::Method::POST, &format!("/v1/tunnels/{id}/access-links")).json(&body).send().await?;
+        let resp =
+            self.req(reqwest::Method::POST, &format!("/v1/tunnels/{id}/access-links")).json(&body).send().await?;
         decode::<Link>(resp, "creating access link").await.map(|l| l.url)
     }
 

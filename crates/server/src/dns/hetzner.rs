@@ -29,11 +29,7 @@ impl Hetzner {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> anyhow::Result<reqwest::Response> {
-        let resp = req
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .with_context(|| format!("Hetzner {what}"))?;
+        let resp = req.bearer_auth(&self.token).send().await.with_context(|| format!("Hetzner {what}"))?;
         ensure_success(resp, &format!("Hetzner {what}")).await
     }
 
@@ -57,14 +53,12 @@ impl Hetzner {
             .context("Hetzner RRSet lookup")?;
         if existing.status() == reqwest::StatusCode::NOT_FOUND {
             let body = json!({ "name": name, "type": rtype, "ttl": TTL, "records": records });
-            self.send(self.http.post(format!("{API}/zones/{}/rrsets", self.zone)).json(&body), "RRSet create")
-                .await?;
+            self.send(self.http.post(format!("{API}/zones/{}/rrsets", self.zone)).json(&body), "RRSet create").await?;
         } else {
             ensure_success(existing, "Hetzner RRSet lookup").await?;
             // Replaces every record in the set, dropping stale addresses.
             let url = format!("{}/actions/set_records", self.rrset_url(&name, rtype));
-            self.send(self.http.post(url).json(&json!({ "records": records })), "RRSet set_records")
-                .await?;
+            self.send(self.http.post(url).json(&json!({ "records": records })), "RRSet set_records").await?;
         }
         Ok(())
     }

@@ -15,8 +15,6 @@ use crate::state::AppState;
 use crate::tokens::{hash_token, now};
 use crate::util::{empty, text_response, Body};
 
-
-
 /// Distinct plausible gate-cookie values considered per request. Preview JS
 /// can toss extra same-named cookies (longer paths are sent first), so this
 /// must exceed what a browser will store for one site (Chrome keeps 180 per
@@ -92,7 +90,8 @@ pub async fn authorize(state: &AppState, tunnel_id: &str, values: &[String]) -> 
         return Ok(None);
     }
     let t = now();
-    let grants_tunnel = |grants: &[(String, i64)]| grants.iter().any(|(id, expires_at)| id == tunnel_id && *expires_at > t);
+    let grants_tunnel =
+        |grants: &[(String, i64)]| grants.iter().any(|(id, expires_at)| id == tunnel_id && *expires_at > t);
     let (hits, misses) = state.cached_session_grants(&hashes);
     if let Some((hash, _)) = hits.into_iter().find(|(_, g)| grants_tunnel(g.as_slice())) {
         return Ok(Some(hash));
@@ -166,12 +165,16 @@ pub struct LoginForm {
 /// Read a login form body, bounded in size and time. `Err` is the page to show.
 pub async fn read_login_form(body: hyper::body::Incoming) -> Result<LoginForm, (StatusCode, &'static str)> {
     use http_body_util::BodyExt;
-    let raw = match tokio::time::timeout(LOGIN_BODY_DEADLINE, http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect()).await {
-        Ok(Ok(b)) => b.to_bytes(),
-        Ok(Err(_)) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "The form was too large.")),
-        Err(_) => return Err((StatusCode::REQUEST_TIMEOUT, "The form took too long to arrive.")),
-    };
-    let mut form = LoginForm { to: String::new(), username: String::new(), password: String::new(), next: String::new() };
+    let raw =
+        match tokio::time::timeout(LOGIN_BODY_DEADLINE, http_body_util::Limited::new(body, LOGIN_BODY_LIMIT).collect())
+            .await
+        {
+            Ok(Ok(b)) => b.to_bytes(),
+            Ok(Err(_)) => return Err((StatusCode::PAYLOAD_TOO_LARGE, "The form was too large.")),
+            Err(_) => return Err((StatusCode::REQUEST_TIMEOUT, "The form took too long to arrive.")),
+        };
+    let mut form =
+        LoginForm { to: String::new(), username: String::new(), password: String::new(), next: String::new() };
     for (k, v) in url::form_urlencoded::parse(&raw) {
         match &*k {
             "to" => form.to = v.into_owned(),

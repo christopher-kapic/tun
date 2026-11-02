@@ -102,7 +102,9 @@ pub async fn status(json: bool) -> anyhow::Result<i32> {
 
 pub async fn ice(format: IceFormat, fresh: bool, exec: Vec<String>) -> anyhow::Result<i32> {
     let (config, ice_file, endpoint) = match ask(Request::Ice { fresh }, false, false).await? {
-        Answer::Response(Response::Ice { ice, ice_file, ice_url, ice_token }) => (ice, ice_file, ice_url.zip(ice_token)),
+        Answer::Response(Response::Ice { ice, ice_file, ice_url, ice_token }) => {
+            (ice, ice_file, ice_url.zip(ice_token))
+        }
         Answer::Response(_) => bail!("unexpected daemon response"),
         Answer::Exit(code) => return Ok(code),
         Answer::Stopped => bail!("cockpit-preview is not running; run `cockpit-preview expose <PORT>` first"),
