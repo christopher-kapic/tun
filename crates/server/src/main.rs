@@ -17,6 +17,7 @@ mod metrics;
 mod mode;
 mod pages;
 mod password;
+mod pool;
 mod proxy;
 mod purge;
 mod ratelimit;

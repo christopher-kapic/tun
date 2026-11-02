@@ -26,6 +26,8 @@ pub struct TunnelBytes {
 pub struct Metrics {
     pub live_streams: AtomicI64,
     pub gate_denials: AtomicU64,
+    /// Visitor lookups answered 503 because the lookup slots were full.
+    pub lookups_shed: AtomicU64,
     pub access_redemptions: AtomicU64,
     pub access_failures: AtomicU64,
     pub requests: AtomicU64,
@@ -60,6 +62,8 @@ impl Metrics {
         let _ = writeln!(out, "cockpit_requests_total {}", self.requests.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_gate_denials_total counter");
         let _ = writeln!(out, "cockpit_gate_denials_total {}", self.gate_denials.load(Ordering::Relaxed));
+        let _ = writeln!(out, "# TYPE cockpit_lookups_shed_total counter");
+        let _ = writeln!(out, "cockpit_lookups_shed_total {}", self.lookups_shed.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_access_redemptions_total counter");
         let _ = writeln!(out, "cockpit_access_redemptions_total {}", self.access_redemptions.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_access_failures_total counter");

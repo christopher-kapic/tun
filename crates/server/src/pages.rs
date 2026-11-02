@@ -134,6 +134,11 @@ pub fn busy() -> Response<Body> {
     )
 }
 
+/// Too many visitor lookups in flight server-wide (see `state`).
+pub fn server_busy() -> Response<Body> {
+    page(StatusCode::SERVICE_UNAVAILABLE, "Server busy", "The server is handling too many requests. This page retries every few seconds.", Some(5))
+}
+
 pub fn ended() -> Response<Body> {
     page(StatusCode::GONE, "Preview ended", "This preview has been stopped or has expired.", None)
 }

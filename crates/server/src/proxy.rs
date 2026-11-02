@@ -1,6 +1,6 @@
-//! Forwarding one visitor request to the sandbox origin over a fresh Yamux
-//! stream (HTTP/1.1 toward the origin, no pooling), including WebSocket
-//! upgrades and HTTP/2 Extended CONNECT.
+//! Forwarding one visitor request to the sandbox origin over HTTP/1.1 on a
+//! Yamux stream (reused from the tunnel's `pool` when one is idle), including
+//! WebSocket upgrades (always on a fresh stream) and HTTP/2 Extended CONNECT.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -19,6 +19,7 @@ use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_yamux::StreamHandle;
@@ -102,29 +103,35 @@ pub async fn forward(
         tracing::warn!(tunnel = %tunnel.id, "too many streams in progress");
         return pages::busy();
     };
-    let stream = match tokio::time::timeout(STREAM_OPEN_TIMEOUT, open_stream(&live, port)).await {
-        Ok(Opened::Ready(s)) => s,
-        Ok(Opened::Refused) => return pages::app_not_running(port),
-        Ok(Opened::Offline) | Err(_) => return pages::offline(),
+    // Ordinary requests reuse an idle origin connection when one is ready.
+    let pooled = if ws.is_none() { live.pool.checkout(port) } else { None };
+    let reused = pooled.is_some();
+    let mut sender = match pooled {
+        Some(s) => s,
+        None => match origin_conn(&live, port, &tunnel.id).await {
+            Ok(s) => s,
+            Err(page) => return page,
+        },
     };
 
-    let (mut sender, conn) = match hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(stream)).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            tracing::debug!(tunnel = %tunnel.id, port, error = %e, "origin handshake failed");
-            return pages::bad_gateway();
+    let sent = tokio::time::timeout(RESPONSE_HEADER_TIMEOUT, async {
+        match sender.try_send_request(out).await {
+            Ok(r) => Ok(r),
+            // The idle connection closed before the request went out (the
+            // origin's keep-alive ran out): retry once on a new connection.
+            Err(mut e) if reused && e.message().is_some() => {
+                let req = e.take_message().expect("checked above");
+                sender = origin_conn(&live, port, &tunnel.id).await.map_err(SendFail::Page)?;
+                sender.send_request(req).await.map_err(SendFail::Origin)
+            }
+            Err(e) => Err(SendFail::Origin(e.into_error())),
         }
-    };
-    let conn_tunnel = tunnel.id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = conn.with_upgrades().await {
-            tracing::debug!(tunnel = %conn_tunnel, error = %e, "origin connection error");
-        }
-    });
-
-    let mut resp = match tokio::time::timeout(RESPONSE_HEADER_TIMEOUT, sender.send_request(out)).await {
+    })
+    .await;
+    let mut resp = match sent {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
+        Ok(Err(SendFail::Page(page))) => return page,
+        Ok(Err(SendFail::Origin(e))) => {
             tracing::debug!(tunnel = %tunnel.id, port, error = %e, "origin request failed");
             return pages::bad_gateway();
         }
@@ -133,6 +140,18 @@ pub async fn forward(
             return pages::gateway_timeout();
         }
     };
+    if ws.is_none() {
+        // Back to the pool once this response's body has been read (hyper
+        // reports ready only for a keep-alive connection).
+        let weak = Arc::downgrade(&live);
+        tokio::spawn(async move {
+            if sender.ready().await.is_ok() {
+                if let Some(live) = weak.upgrade().filter(|l| l.has_port(port)) {
+                    live.pool.put(port, sender);
+                }
+            }
+        });
+    }
 
     if let (Some(kind), Some(visitor_upgrade)) = (ws, visitor_upgrade) {
         if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -327,6 +346,36 @@ fn upgrade_response(kind: WsKind, origin: &HeaderMap) -> Response<Body> {
         }
     }
     resp
+}
+
+enum SendFail {
+    /// No new connection could be opened; the page says why.
+    Page(Response<Body>),
+    Origin(hyper::Error),
+}
+
+/// A new HTTP/1.1 connection to `port`: a Yamux stream the client splices
+/// to the loopback origin. `Err` is the page to show the visitor.
+async fn origin_conn(live: &LiveTunnel, port: u16, tunnel_id: &str) -> Result<SendRequest<Body>, Response<Body>> {
+    let stream = match tokio::time::timeout(STREAM_OPEN_TIMEOUT, open_stream(live, port)).await {
+        Ok(Opened::Ready(s)) => s,
+        Ok(Opened::Refused) => return Err(pages::app_not_running(port)),
+        Ok(Opened::Offline) | Err(_) => return Err(pages::offline()),
+    };
+    let (sender, conn) = match hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(stream)).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::debug!(tunnel = %tunnel_id, port, error = %e, "origin handshake failed");
+            return Err(pages::bad_gateway());
+        }
+    };
+    let conn_tunnel = tunnel_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = conn.with_upgrades().await {
+            tracing::debug!(tunnel = %conn_tunnel, error = %e, "origin connection error");
+        }
+    });
+    Ok(sender)
 }
 
 enum Opened {

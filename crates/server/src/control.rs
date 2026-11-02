@@ -239,6 +239,7 @@ async fn control_loop(
         cancel: cancel.clone(),
         connected_at: now(),
         streams: Default::default(),
+        pool: Default::default(),
     });
 
     // Writer: the only task that writes to the control stream. A Close is the
@@ -381,6 +382,7 @@ fn handle_msg(state: &AppState, tunnel: &TunnelRow, live: &LiveTunnel, msg: Clie
         ClientMsg::Unexpose { id, port } => {
             let removed = live.ports.write().expect("ports lock").remove(&port);
             if removed {
+                live.pool.clear_port(port);
                 tracing::info!(tunnel = %tunnel.id, port, "port unexposed");
             }
             Some(reply_ok(id, None))

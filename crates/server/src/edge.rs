@@ -269,6 +269,9 @@ fn log_path(path: &str) -> String {
 }
 
 fn internal_error(tunnel_id: &str, e: anyhow::Error) -> Response<Body> {
+    if e.is::<crate::state::LookupsBusy>() {
+        return pages::server_busy();
+    }
     tracing::error!(tunnel = tunnel_id, error = %e, "edge lookup failed");
     text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }

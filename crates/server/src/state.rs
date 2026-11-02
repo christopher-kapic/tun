@@ -15,6 +15,18 @@ use crate::tls::CertStore;
 const TUNNEL_CACHE_TTL: Duration = Duration::from_secs(5);
 const SESSION_CACHE_TTL: Duration = Duration::from_secs(10);
 const CACHE_MAX_ENTRIES: usize = 50_000;
+/// Database lookups that visitors can trigger (tunnel by host, session by
+/// cookie) in flight at once. Visitors choose hosts and cookie values freely,
+/// so cache misses are theirs to make; without a bound each would queue a
+/// blocking task on the one SQLite connection.
+const VISITOR_LOOKUPS: usize = 32;
+/// How long a lookup waits for a slot before the visitor gets a 503.
+const VISITOR_LOOKUP_WAIT: Duration = Duration::from_secs(2);
+
+/// Visitor lookups are saturated; answer 503 rather than queue more.
+#[derive(Debug, thiserror::Error)]
+#[error("too many lookups in progress")]
+pub struct LookupsBusy;
 
 /// Unexpired `(tunnel_id, expires_at)` grants of one gate session.
 pub type Grants = Arc<Vec<(String, i64)>>;
@@ -78,6 +90,7 @@ pub struct AppState {
     pub access_limiter: RateLimiter,
     tunnel_cache: Cache<Arc<TunnelLookup>>,
     session_cache: Cache<Grants>,
+    visitor_lookups: tokio::sync::Semaphore,
 }
 
 impl AppState {
@@ -92,6 +105,7 @@ impl AppState {
             access_limiter,
             tunnel_cache: Cache::new(TUNNEL_CACHE_TTL),
             session_cache: Cache::new(SESSION_CACHE_TTL),
+            visitor_lookups: tokio::sync::Semaphore::new(VISITOR_LOOKUPS),
         })
     }
 
@@ -100,6 +114,11 @@ impl AppState {
     /// costs one query per id per TTL. Live rows may be expired; callers check
     /// `is_expired()`.
     pub async fn tunnel(&self, id: &str) -> anyhow::Result<Arc<TunnelLookup>> {
+        if let Some(found) = self.tunnel_cache.get(id) {
+            return Ok(found);
+        }
+        let _slot = self.admit_lookup().await?;
+        // Another request may have filled the cache while this one waited.
         if let Some(found) = self.tunnel_cache.get(id) {
             return Ok(found);
         }
@@ -135,6 +154,7 @@ impl AppState {
         if session_hashes.is_empty() {
             return Ok(Vec::new());
         }
+        let _slot = self.admit_lookup().await?;
         let epoch = self.session_cache.epoch();
         let found = self.db.session_grants(session_hashes).await?;
         let mut out = Vec::with_capacity(found.len());
@@ -144,6 +164,16 @@ impl AppState {
             out.push((hash, grants));
         }
         Ok(out)
+    }
+
+    async fn admit_lookup(&self) -> anyhow::Result<tokio::sync::SemaphorePermit<'_>> {
+        match tokio::time::timeout(VISITOR_LOOKUP_WAIT, self.visitor_lookups.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => {
+                Metrics::inc(&self.metrics.lookups_shed);
+                Err(LookupsBusy.into())
+            }
+        }
     }
 
     /// Revocation affects many sessions at once; drop the whole cache.

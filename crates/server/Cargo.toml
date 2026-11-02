@@ -52,3 +52,6 @@ tower = { version = "0.5", features = ["util"] }
 url = "2"
 utoipa = "5"
 x509-parser = "0.16"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

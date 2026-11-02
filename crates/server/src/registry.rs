@@ -24,6 +24,8 @@ pub struct LiveTunnel {
     pub connected_at: i64,
     /// Visitor requests and WebSockets in progress on this connection.
     pub streams: AtomicUsize,
+    /// Idle origin connections for reuse.
+    pub pool: crate::pool::OriginPool,
 }
 
 impl LiveTunnel {
