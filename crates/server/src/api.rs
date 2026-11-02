@@ -438,6 +438,7 @@ pub struct TurnCredentialsResponse {
         enroll_client,
     ),
     components(schemas(
+        Health,
         ErrorBody,
         ErrorDetail,
         CreateTunnelRequest,
@@ -477,9 +478,71 @@ impl Modify for BearerAuth {
 
 // ---------------------------------------------------------------- handlers
 
-#[utoipa::path(get, path = "/healthz", security(()), responses((status = 200, description = "Alive", body = String)))]
-async fn healthz() -> &'static str {
-    "ok"
+/// Fail the health check when the certificate expires sooner than this
+/// (renewal normally runs with a third of the lifetime left, ~30 days).
+const HEALTH_MIN_CERT_DAYS: i64 = 7;
+const HEALTH_DB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct Health {
+    /// `ok` or `failing`.
+    pub status: String,
+    pub database: bool,
+    /// Days until the served certificate expires (`None`: none loaded).
+    pub certificate_days_left: Option<i64>,
+    pub version: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    params(("token" = Option<String>, Query, description = "Health token, for monitors that cannot send headers")),
+    security(()),
+    responses(
+        (status = 200, body = Health, description = "Healthy"),
+        (status = 503, body = Health, description = "Database not answering, or certificate missing or expiring within 7 days"),
+        (status = 404, description = "A health token is configured and none (or a wrong one) was presented"),
+    )
+)]
+async fn healthz(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    uri: http::Uri,
+) -> Result<(StatusCode, Json<Health>), ApiError> {
+    if let Some(expected) = &state.config.health_token_hash {
+        let from_query = uri.query().and_then(|q| {
+            url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == "token").map(|(_, v)| v.into_owned())
+        });
+        let from_header = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|v| v.trim().to_string());
+        let ok = [from_query, from_header].into_iter().flatten().any(|t| {
+            let h = tokens::hash_token(&t);
+            tokens::hashes_equal(&h, expected) || tokens::hashes_equal(&h, &state.config.admin_token_hash)
+        });
+        if !ok {
+            // Indistinguishable from an unknown route.
+            return Err(ApiError::not_found("route"));
+        }
+    }
+    let database = tokio::time::timeout(
+        HEALTH_DB_TIMEOUT,
+        state.db.call(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok());
+    let certificate_days_left = state.certs.not_after().map(|t| (t - now()).div_euclid(86_400));
+    let healthy = database && certificate_days_left.is_some_and(|d| d >= HEALTH_MIN_CERT_DAYS);
+    let status = if healthy { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let body = Health {
+        status: if healthy { "ok" } else { "failing" }.to_string(),
+        database,
+        certificate_days_left,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    Ok((status, Json(body)))
 }
 
 async fn openapi_json(_admin: Admin) -> Json<utoipa::openapi::OpenApi> {

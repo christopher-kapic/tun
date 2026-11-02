@@ -55,6 +55,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
+    /// Protect /healthz with an optional token (for uptime monitors).
+    HealthToken {
+        #[command(subcommand)]
+        cmd: HealthTokenCmd,
+    },
     /// Show service, database, and certificate status.
     Status,
     /// Write a consistent SQLite backup (`VACUUM INTO`).
@@ -79,6 +84,14 @@ enum ClientCmd {
     List,
     /// Remove a machine: its token stops working and its tunnels close.
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum HealthTokenCmd {
+    /// Require a token for /healthz: generate one, print it once, restart.
+    Set,
+    /// Make /healthz open again.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -115,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Serve => commands::serve(&config).await,
         Cmd::Setup(args) => setup::run(&config, args).await,
         Cmd::Token { cmd: TokenCmd::Rotate } => commands::token_rotate(&config).await,
+        Cmd::HealthToken { cmd } => commands::health_token(&config, matches!(cmd, HealthTokenCmd::Set)).await,
         Cmd::Status => commands::status(&config).await,
         Cmd::Backup { path } => commands::backup(&config, &path).await,
         Cmd::Cert { cmd: CertCmd::Renew { force } } => commands::cert_renew(&config, force).await,

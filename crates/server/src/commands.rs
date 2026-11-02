@@ -14,6 +14,8 @@ use crate::tls::{self, CertStatus};
 use crate::tokens;
 use crate::{acme, listener, metrics, purge, util};
 
+const HEALTH_TOKEN_PREFIX: &str = "cthlt_";
+
 /// Time for `Close { Shutdown }` to reach clients before the process exits.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
@@ -92,6 +94,35 @@ pub async fn token_rotate(config_path: &Path) -> anyhow::Result<()> {
     println!("Harness environment:");
     println!("  COCKPIT_TUNNEL_API=https://{}", cfg.api_host);
     println!("  COCKPIT_TUNNEL_ADMIN_TOKEN={token}");
+    Ok(())
+}
+
+/// `health-token set`: a new `/healthz` token (shown once); `clear` reopens it.
+pub async fn health_token(config_path: &Path, set: bool) -> anyhow::Result<()> {
+    ensure_can_write(config_path, "health-token")?;
+    let mode = install_mode(config_path);
+    let mut cfg = Config::load(config_path)?;
+    let token = set.then(|| tokens::random_token(HEALTH_TOKEN_PREFIX));
+    cfg.health_token_hash = token.as_deref().map(tokens::hash_token);
+    cfg.save(config_path)?;
+    if mode == Mode::System {
+        util::chown_recursive(config_path, SERVICE_USER)?;
+    }
+    if !mode.systemctl_ok(&["try-restart", SERVICE_NAME]) {
+        eprintln!("warning: restarting {SERVICE_NAME} failed; restart the service so the change takes effect");
+    }
+    match token {
+        Some(token) => {
+            println!("New health token (shown once). /healthz now answers only with it:");
+            println!();
+            println!("  curl -H 'Authorization: Bearer {token}' https://{}/healthz", cfg.api_host);
+            println!("  https://{}/healthz?token={token}   (for monitors that cannot send headers)", cfg.api_host);
+            println!();
+            println!("It returns 200 when healthy, 503 when the database does not answer or the");
+            println!("certificate is missing or expires within 7 days.");
+        }
+        None => println!("Health token removed; /healthz is open to anyone again."),
+    }
     Ok(())
 }
 

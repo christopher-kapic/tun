@@ -894,7 +894,9 @@ async fn self_test(cfg: &Config, mode: Mode) -> anyhow::Result<()> {
         .danger_accept_invalid_certs(cfg.acme.staging)
         .build()?;
     let health = format!("https://{}/healthz", cfg.api_host);
-    expect_status(&client, &health, 200, mode).await?;
+    // A protected /healthz is a 404 without its token, which still proves TLS and routing.
+    let want = if cfg.health_token_hash.is_some() { 404 } else { 200 };
+    expect_status(&client, &health, want, mode).await?;
     // Unknown tunnel id → 404 proves the wildcard cert and preview routing.
     let probe = format!("https://1-{}.{}/", tokens::random_tunnel_id(), cfg.preview_zone);
     expect_status(&client, &probe, 404, mode).await?;

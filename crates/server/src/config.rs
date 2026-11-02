@@ -42,6 +42,12 @@ pub struct Config {
     /// Hex SHA-256 of the admin API token.
     pub admin_token_hash: String,
 
+    /// Hex SHA-256 of the optional `/healthz` token (`health-token set`).
+    /// When set, `/healthz` answers only callers that present it (or the
+    /// admin token) and is a plain 404 to everyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_token_hash: Option<String>,
+
     #[serde(default)]
     pub public_ipv4: Option<Ipv4Addr>,
     #[serde(default)]
