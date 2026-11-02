@@ -14,10 +14,14 @@ the code could not be checked offline.
   `ServerMsg { Welcome{tunnel_id, host_template, max_ports, ports, webrtc}, Reply{id, ok, error?, ice?}, Close{reason} }`,
   `CloseReason { Deleted, Expired, Replaced, Shutdown }`, `IceConfig { iceServers, expires_at, ttl_s }`, `IceServer`.
 - Constants: `PROTOCOL_VERSION`, `CONNECT_PATH` (`/v1/connect`), token prefixes, `GATE_COOKIE`,
-  `PING_INTERVAL` (25s), `STREAM_WINDOW` (256 KiB), `MAX_CONTROL_LINE`, `STREAM_OK/REFUSED/NOT_EXPOSED`,
+  `PING_INTERVAL` (25s), `MAX_CONTROL_LINE`, `STREAM_OK/REFUSED/NOT_EXPOSED`,
   `EXIT_REVOKED` (3), `EXIT_REPLACED` (4).
-- `yamux_config()`, `encode_preamble(port) -> [u8; 2]`, `decode_preamble`, `read_json_line`, `write_json_line`.
-- `ws_bridge::bridge(ws, ping_interval) -> (DuplexStream, JoinHandle<()>)`.
+- `encode_preamble(port) -> [u8; 2]`, `decode_preamble`, `read_json_line`, `write_json_line`.
+- `ws_bridge::bridge(ws, ping_interval) -> (DuplexStream, JoinHandle<()>)`: one pump task per direction;
+  the writer drains the pipe into messages before one flush.
+- `mux::Session::{new_client, new_server}(io)`, `Session::control()`, `Session::next().await -> Option<mux::Stream>`,
+  `mux::Control::{open_stream, close}` (async; the opener must write first), `mux::Stream`
+  (tokio `AsyncRead + AsyncWrite`). rust-yamux 0.14; 600 streams, 256 KiB per-stream window.
 
 Data streams: the server opens a Yamux stream, writes the 2-byte big-endian
 port, the client answers with one status byte, then raw bytes. There are no
@@ -199,10 +203,8 @@ State dir: `$XDG_RUNTIME_DIR/cockpit-preview/` (else `/tmp/cockpit-preview-<uid>
 tokio 1, hyper 1.12, hyper-util 0.1.21, http-body-util 0.1.5, axum 0.8.9 (path params `{id}`, native async extractors),
 utoipa 5.5, rustls 0.23.46 (ring; provider installed in `main`), tokio-rustls 0.26.6, rustls-pemfile 2.2,
 tokio-tungstenite / tungstenite 0.26.2 (`Message::Binary(Bytes)`; `WebSocketConfig` is `#[non_exhaustive]` with
-builder setters), tokio-yamux 0.3.20 (`Session::new_server/new_client`, `Session::control(&self)`,
-`Control::open_stream(&mut self).await`, `Control::close(&mut self).await`,
-`Session: Stream<Item = io::Result<StreamHandle>>`, `StreamHandle: AsyncRead + AsyncWrite + Unpin`,
-`Error: Display`), instant-acme 0.7.2 (ring + hyper-rustls defaults), rcgen 0.13.2, rusqlite 0.32 (bundled),
+builder setters), yamux (rust-yamux) 0.14.1 behind `protocol::mux` (tokio-yamux 0.3.20 only as a
+dev-dependency for the interop test), instant-acme 0.7.2 (ring + hyper-rustls defaults), rcgen 0.13.2, rusqlite 0.32 (bundled),
 reqwest 0.12.28 (rustls-tls, json), x509-parser 0.16, time 0.3.55 (no `formatting`; `Date: Display`),
 hmac 0.12, sha1/sha2 0.10.
 

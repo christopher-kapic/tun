@@ -18,7 +18,7 @@ work and its decisions: [`docs/onboarding-access-clients.md`](docs/onboarding-ac
 ```text
 Cargo.toml                 workspace, shared dependency versions, release profile
 install.sh                 curl | sh installer: download, verify, exec `setup`
-crates/protocol/           wire messages, constants, Yamux config, WebSocket↔bytes bridge
+crates/protocol/           wire messages, constants, mux (rust-yamux driver), WebSocket↔bytes bridge
 crates/server/             cockpit-tunnel-server (VPS)
   src/main.rs              CLI: serve | setup | token rotate | status | backup | cert renew
   src/commands.rs          non-interactive subcommands; `serve` wires everything together
@@ -153,7 +153,7 @@ These could not be checked offline:
 The implementers' other `verify:` notes were checked against the sources of the
 exact locked versions, and the comments were removed:
 
-- tokio-yamux 0.3.20: `StreamHandle` re-exported at the root and `Unpin`; `Session::control(&self)`; `Control::open_stream(&mut self)` and `Control::close(&mut self)` are async; `Session: Stream<Item = io::Result<StreamHandle>>`; `Error: Display`.
+- Yamux is rust-yamux 0.14.1 behind `protocol::mux` (tokio-yamux 0.3.20 stalled every stream when one reader stopped; audit #12). rust-yamux opens streams lazily, so the opener writes first.
 - tungstenite 0.26.2: `WebSocketConfig` is `#[non_exhaustive]` with `max_frame_size` / `max_message_size` setters; `derive_accept_key(&[u8])`; `Error::Http(Response<Option<Vec<u8>>>)`; `connect_async_with_config(req, Option<cfg>, disable_nagle)`.
 - hyper-util 0.1.21: `Http2Builder::enable_connect_protocol`, `timer` on both builders, `Http1Builder::header_read_timeout`, `serve_connection_with_upgrades`.
 - instant-acme 0.7.2: `Order::certificate` re-polls while `Processing`; `Problem { r#type, detail }`; `NewOrder { identifiers: &[..] }`; `Account::create(&NewAccount, url, None) -> (Account, AccountCredentials)`; `refresh() -> &OrderState`; `ChallengeType: PartialEq`; ring is the default backend (no aws-lc).
