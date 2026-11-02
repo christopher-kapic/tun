@@ -53,6 +53,25 @@ fn ufw_active() -> bool {
     os::output("ufw", &["status"]).map(|s| s.lines().any(|l| l.trim() == "Status: active")).unwrap_or(false)
 }
 
+/// Rootless install: the one root command that opens the required ports when
+/// a host firewall is running (`ufw status` itself needs root, so the service
+/// state decides). `None` when neither ufw nor firewalld runs.
+pub fn rootless_command(cfg: &Config) -> Option<String> {
+    let ports = required_ports(cfg);
+    if os::succeeds("systemctl", &["is-active", "--quiet", "ufw"]) {
+        let rules: Vec<String> =
+            ports.iter().map(|(p, proto)| format!("ufw allow {}/{proto}", p.replace('-', ":"))).collect();
+        return Some(format!("sudo sh -c '{}'", rules.join(" && ")));
+    }
+    if os::succeeds("systemctl", &["is-active", "--quiet", "firewalld"]) {
+        let mut rules: Vec<String> =
+            ports.iter().map(|(p, proto)| format!("firewall-cmd --permanent --add-port={p}/{proto}")).collect();
+        rules.push("firewall-cmd --reload".into());
+        return Some(format!("sudo sh -c '{}'", rules.join(" && ")));
+    }
+    None
+}
+
 fn firewalld_running() -> bool {
     os::output("firewall-cmd", &["--state"]).map(|s| s.trim() == "running").unwrap_or(false)
 }

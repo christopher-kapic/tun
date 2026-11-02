@@ -195,6 +195,9 @@ async fn configure(
                 .join(", ")
         );
         println!("(host firewall and any cloud provider firewall).");
+        if let Some(cmd) = firewall::rootless_command(cfg) {
+            println!("A host firewall is running. If these ports are not open yet, run once:\n\n  {cmd}\n");
+        }
     }
 
     step("Service");
