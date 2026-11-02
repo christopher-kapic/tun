@@ -36,7 +36,7 @@ Target layout for `--host tunnel.kapic.io`:
     binary `~/.local/bin/cockpit-tunnel-server`, systemd **user** unit.
   - preflight checks `ip_unprivileged_port_start <= 80` and lingering; if missing, print the
     one sudo command (also migrates an existing system install) and stop.
-  - no service user, no chown, no host firewall changes; WebRTC refused for now (coturn needs root).
+  - no service user, no chown, no host firewall changes; WebRTC uses the built-in relay (no coturn, no root).
   - `status`, `token rotate`, `cert renew` work without root in this mode.
 - [x] Setup installs its own binary to the service path (system: `/usr/local/bin`).
 

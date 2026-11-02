@@ -100,10 +100,11 @@ pub struct WebrtcConfig {
     pub enabled: bool,
     #[serde(default)]
     pub static_auth_secret: String,
-    /// Where SNI passthrough for `turn_host` goes.
-    #[serde(default = "default_coturn_tls")]
+    /// Unused since the built-in relay (was coturn's TLS listener); kept so
+    /// older configs still parse.
+    #[serde(default = "default_coturn_tls", skip_serializing)]
     pub coturn_tls_addr: SocketAddr,
-    /// Route TLS ClientHellos without SNI to coturn as well.
+    /// Treat TLS connections on 443 without SNI as TURN over TLS.
     #[serde(default = "default_true")]
     pub passthrough_no_sni: bool,
     #[serde(default = "default_browser_ttl")]
@@ -267,12 +268,19 @@ impl Config {
             self.api_host.clone(),
             self.tunnel_host.clone(),
         ];
-        if self.webrtc.enabled {
+        if self.webrtc.enabled && !self.covered_by_wildcard(&self.turn_host) {
             names.push(self.turn_host.clone());
         }
         names.sort();
         names.dedup();
         names
+    }
+
+    /// `host` is one label below the preview zone, so `*.<zone>` (certificate
+    /// and DNS) already covers it.
+    pub fn covered_by_wildcard(&self, host: &str) -> bool {
+        host.strip_suffix(&format!(".{}", self.preview_zone))
+            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
     }
 
     /// `{port}-<id>.<zone>` host for a tunnel port.

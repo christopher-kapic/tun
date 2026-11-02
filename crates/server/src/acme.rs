@@ -214,7 +214,7 @@ async fn challenge_errors(order: &mut Order) -> String {
 
 /// Background renewal: first check shortly after start, then every 12 hours
 /// (hourly while failing). Issuance writes the files; reloading here (and the
-/// 60s watcher) swaps the cert in. coturn picks it up via setup's systemd path unit.
+/// 60s watcher) swaps the cert in. The TURN relay uses the same store.
 pub async fn renew_loop(state: Arc<AppState>) {
     tokio::time::sleep(FIRST_CHECK_DELAY).await;
     loop {

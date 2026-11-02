@@ -1,5 +1,5 @@
 //! Read the SNI from a TLS ClientHello without consuming it, so the connection
-//! can be spliced to coturn untouched or handed to rustls.
+//! can be routed to the TURN relay or the HTTPS stack before the handshake.
 
 use std::io;
 use std::time::Duration;

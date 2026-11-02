@@ -28,6 +28,8 @@ pub struct Metrics {
     pub gate_denials: AtomicU64,
     /// Visitor lookups answered 503 because the lookup slots were full.
     pub lookups_shed: AtomicU64,
+    /// Built-in TURN relay gauges.
+    pub turn: Arc<crate::turn_relay::MetricsRef>,
     pub access_redemptions: AtomicU64,
     pub access_failures: AtomicU64,
     pub requests: AtomicU64,
@@ -59,6 +61,8 @@ impl Metrics {
         let _ = writeln!(out, "cockpit_gate_denials_total {}", self.gate_denials.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_lookups_shed_total counter");
         let _ = writeln!(out, "cockpit_lookups_shed_total {}", self.lookups_shed.load(Ordering::Relaxed));
+        let _ = writeln!(out, "# TYPE cockpit_turn_allocations gauge");
+        let _ = writeln!(out, "cockpit_turn_allocations {}", self.turn.allocations.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_access_redemptions_total counter");
         let _ = writeln!(out, "cockpit_access_redemptions_total {}", self.access_redemptions.load(Ordering::Relaxed));
         let _ = writeln!(out, "# TYPE cockpit_access_failures_total counter");

@@ -32,6 +32,15 @@ pub async fn serve(config_path: &Path) -> anyhow::Result<()> {
     let state = AppState::new(cfg, db, certs.clone());
     tracing::info!(not_after = certs.not_after(), "certificate loaded");
 
+    if state.config.webrtc.enabled {
+        match crate::turn_relay::Relay::start(&state.config, &state.metrics).await {
+            Ok(relay) => {
+                let _ = state.turn.set(relay);
+            }
+            // Previews matter more than WebRTC; keep serving and say why.
+            Err(e) => tracing::error!(error = %format!("{e:#}"), "TURN relay failed to start; WebRTC is unavailable"),
+        }
+    }
     tokio::spawn(tls::watch(certs));
     tokio::spawn(acme::renew_loop(state.clone()));
     tokio::spawn(purge::run(state.clone()));
@@ -137,7 +146,11 @@ pub async fn status(config_path: &Path) -> anyhow::Result<()> {
     let kind = if mode == Mode::System { "root install" } else { "rootless install" };
     println!("service:     {} ({kind})", mode.service_state(SERVICE_NAME));
     if cfg.webrtc.enabled {
-        println!("coturn:      {} (turn host {})", Mode::System.service_state("coturn"), cfg.turn_host);
+        let w = &cfg.webrtc;
+        println!(
+            "webrtc:      built-in relay, turn host {} (udp/tcp {}, tls 443, relays udp {}-{})",
+            cfg.turn_host, w.stun_port, w.relay_min_port, w.relay_max_port
+        );
     } else {
         println!("webrtc:      disabled");
     }

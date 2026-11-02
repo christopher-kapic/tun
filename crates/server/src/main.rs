@@ -27,6 +27,7 @@ mod sni;
 mod state;
 mod tls;
 mod tokens;
+mod turn_relay;
 mod util;
 
 use std::path::PathBuf;

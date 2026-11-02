@@ -5,7 +5,7 @@ only outbound 443 runs `cockpit-preview`, which keeps one WSS connection to a
 VPS running `cockpit-tunnel-server`. Visitors open
 `https://{port}-{id}.previews.example.com`, pass a cookie gate minted from a
 click-time access link, and reach the sandbox port over HTTP/1.1, HTTP/2,
-WebSockets, SSE, and (through coturn) WebRTC. Private project.
+WebSockets, SSE, and WebRTC (built-in STUN/TURN relay). Private project.
 
 Behavior is specified in [`cockpit-tunnel-plan.md`](cockpit-tunnel-plan.md);
 module interfaces are in [`docs/module-contracts.md`](docs/module-contracts.md).
@@ -22,7 +22,8 @@ crates/protocol/           wire messages, constants, mux (rust-yamux driver), We
 crates/server/             cockpit-tunnel-server (VPS)
   src/main.rs              CLI: serve | setup | token rotate | health-token | status | backup | restore | cert renew | client
   src/commands.rs          non-interactive subcommands; `serve` wires everything together
-  src/listener.rs          :443 (SNI peek → coturn passthrough, else TLS + hyper auto) and :80 redirect
+  src/listener.rs          :443 (SNI peek → TURN over TLS, else TLS + hyper auto) and :80 redirect
+  src/turn_relay.rs        built-in STUN/TURN relay (UDP/TCP 3478, TLS via 443), peer filter, limits
   src/edge.rs proxy.rs     visitor edge: lifecycle, gate, reserved paths, forwarding, WebSockets
   src/gate.rs gatehost.rs  gate cookie; sign-in (links, password) on the zone host
   src/headers.rs           hop-by-hop, Origin/Location/Set-Cookie/CSP/iframe rewrites
@@ -34,7 +35,7 @@ crates/server/             cockpit-tunnel-server (VPS)
   src/db.rs purge.rs       SQLite and the hourly purge
   src/tls.rs sni.rs acme.rs dns/   certificate store, ClientHello peek, DNS-01 issuance, DNS providers
   src/ice.rs metrics.rs    TURN REST credentials, Prometheus text on 127.0.0.1:9464
-  src/setup/               interactive wizard (prompts, distro packages, coturn, firewall, systemd)
+  src/setup/               interactive wizard (prompts, firewall, systemd)
 crates/client/             cockpit-preview (sandbox); see crates/client/README.md
 docs/module-contracts.md
 ```
@@ -81,7 +82,7 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p cockpit-tunnel-s
    ACME email, DNS provider (Cloudflare, Hetzner, DigitalOcean, Route53) and
    token, and whether to enable WebRTC; then creates the service user and
    directories, writes `/etc/cockpit-tunnel/config.toml`, creates and verifies
-   DNS records, issues the certificate (DNS-01), configures coturn and the
+   DNS records, issues the certificate (DNS-01), configures the
    firewall, installs the systemd unit, self-tests, and prints the admin token
    once. Re-running `setup` changes nothing unless an answer changed.
 
@@ -101,6 +102,16 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p cockpit-tunnel-s
 Admin commands: `cockpit-tunnel-server status`, `token rotate`, `backup <path>`, `restore <path>`,
 `cert renew [--force]`, and `client add <name> | list | delete <name>` (root only
 for a root install).
+
+WebRTC: `setup --webrtc true` turns on the built-in STUN/TURN relay (no coturn,
+works rootless). It listens on UDP and TCP 3478 and takes TURN over TLS on 443
+(SNI `turn.<host>`, covered by the wildcard certificate and DNS record). Relays
+are UDP 49152–65535 at the public IPv4. Open UDP 3478, TCP 3478, and UDP
+49152–65535 in the host or cloud firewall. Relays never reach non-public
+addresses or the server's own other ports; relay-to-relay traffic stays in
+process. Limits: 1,200 relays in total, 3 Mbit/s each, 1,000 TCP/TLS
+connections. Credentials are the per-tunnel ones the edge injects and
+`cockpit-preview ice` prints (TURN REST, `webrtc.static_auth_secret`).
 
 Health check: `GET https://<host>/healthz` returns JSON (`status`, `database`,
 `certificate_days_left`, `version`): 200 when healthy, 503 when the database does
@@ -181,9 +192,8 @@ exact locked versions, and the comments were removed:
 
 ### Runtime checks the compiler cannot do
 
-- [ ] systemd `PathChanged=` on `fullchain.pem` fires when `tls::write_cert_files` renames a new file into place (setup's coturn restart unit).
 - [ ] The tungstenite client offers no ALPN, so the server's hyper `auto` builder speaks HTTP/1.1 to it and the `101` upgrade path is used.
 - [ ] HTTP/2 Extended CONNECT WebSockets through `hyper::upgrade::on` on the visitor side (Chrome/Firefox over h2).
 - [ ] `ws_bridge`: pongs are flushed only on the next send; both sides ping every 25s, which is well under the 62.5s dead-peer limit.
-- [ ] TURN SNI spike: browsers and libwebrtc/Pion/aiortc send SNI on `turns:` (no-SNI hellos are routed to coturn by default anyway).
+- [ ] TURN SNI: browsers and libwebrtc/Pion/aiortc send SNI on `turns:` (no-SNI hellos are treated as TURN by default anyway).
 - [ ] The rest of the plan's "Tests required before done" list.

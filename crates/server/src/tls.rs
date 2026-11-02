@@ -93,6 +93,11 @@ pub fn server_config(store: Arc<CertStore>) -> rustls::ServerConfig {
     config
 }
 
+/// For TURN over TLS: the same certificate, no ALPN.
+pub fn turn_server_config(store: Arc<CertStore>) -> rustls::ServerConfig {
+    rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(store)
+}
+
 /// Pick up renewals written by the renewal task or `cert renew` (another process).
 pub async fn watch(store: Arc<CertStore>) {
     loop {
@@ -107,7 +112,7 @@ pub async fn watch(store: Arc<CertStore>) {
 
 /// Write a freshly issued certificate. Key first, then chain (the store keys
 /// reloads on the chain's mtime), then the name list used by `cert_status`.
-/// Files are group-readable so coturn (in the service group) can use them.
+/// Files are group-readable by the service group.
 pub fn write_cert_files(cert_dir: &Path, fullchain_pem: &str, key_pem: &str, names: &[String]) -> anyhow::Result<()> {
     std::fs::create_dir_all(cert_dir).with_context(|| format!("creating {}", cert_dir.display()))?;
     crate::config::set_mode(cert_dir, 0o750)?;

@@ -140,12 +140,11 @@ pub async fn wait_for_txt(fqdn: &str, value: &str, timeout: Duration) -> anyhow:
 `acme-account.json` is `{ "directory": <url>, "credentials": <AccountCredentials> }`
 (0600); a directory change registers a new account.
 
-## Setup (`setup/{mod,prompt,os,coturn,firewall,systemd}.rs` + `install.sh`)
+## Setup (`setup/{mod,prompt,os,coturn,firewall,systemd}.rs` + `install.sh`; `coturn.rs` only stops a coturn older setups installed)
 
 ```rust
 #[derive(clap::Args)] pub struct SetupArgs { pub staging: bool, pub skip_dns: bool, pub skip_self_test: bool }
 pub async fn run(config_path: &Path, args: SetupArgs) -> anyhow::Result<()>;
-pub use coturn::detect_coturn_user;   // fn() -> Option<String>
 ```
 
 Prompts return `anyhow::Result<T>` (a closed stdin fails instead of looping).
@@ -175,7 +174,7 @@ pub async fn cert_renew(config_path: &Path, force: bool) -> anyhow::Result<()>;
 ```
 
 Listener: SNI peek (only when WebRTC is enabled) → `turn_host` (or no SNI, if
-`passthrough_no_sni`) is spliced raw to `coturn_tls_addr`; everything else gets
+`passthrough_no_sni`) gets TLS without ALPN and is served by `turn_relay::Relay::serve_stream`; everything else gets
 TLS → hyper-util `auto` (h1 + h2, `enable_connect_protocol`,
 `serve_connection_with_upgrades`, 30s header read timeout). Routing is by
 `Host`, never SNI: `host == tunnel_host && path == CONNECT_PATH` →

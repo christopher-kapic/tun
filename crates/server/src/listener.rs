@@ -1,4 +1,4 @@
-//! Public listeners: `:443` (SNI passthrough to coturn, else TLS + HTTP/1.1 and
+//! Public listeners: `:443` (SNI `turn_host` → TURN over TLS to the built-in relay, else TLS + HTTP/1.1 and
 //! HTTP/2 routed by `Host`) and `:80` (redirect to HTTPS only).
 
 use std::convert::Infallible;
@@ -62,6 +62,7 @@ pub async fn run_https(state: Arc<AppState>) -> anyhow::Result<()> {
     let addr = state.config.listen_https;
     let listener = TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     let acceptor = TlsAcceptor::from(Arc::new(tls::server_config(state.certs.clone())));
+    let turn_acceptor = TlsAcceptor::from(Arc::new(tls::turn_server_config(state.certs.clone())));
     let hosts = Arc::new(Hosts::new(&state));
     tracing::info!(%addr, "https listener started");
 
@@ -78,9 +79,10 @@ pub async fn run_https(state: Arc<AppState>) -> anyhow::Result<()> {
         let peer = canonical(peer);
         let state = state.clone();
         let acceptor = acceptor.clone();
+        let turn_acceptor = turn_acceptor.clone();
         let hosts = hosts.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_https_conn(state, acceptor, hosts, tcp, peer).await {
+            if let Err(e) = serve_https_conn(state, acceptor, turn_acceptor, hosts, tcp, peer).await {
                 tracing::debug!(%peer, error = %e, "https connection ended with error");
             }
         });
@@ -95,24 +97,26 @@ fn canonical(peer: SocketAddr) -> SocketAddr {
 async fn serve_https_conn(
     state: Arc<AppState>,
     acceptor: TlsAcceptor,
+    turn_acceptor: TlsAcceptor,
     hosts: Arc<Hosts>,
-    mut tcp: TcpStream,
+    tcp: TcpStream,
     peer: SocketAddr,
 ) -> Result<(), BoxError> {
     let _ = tcp.set_nodelay(true);
 
     let webrtc = &state.config.webrtc;
-    if webrtc.enabled {
-        let to_coturn = match sni::peek_sni(&tcp, SNI_PEEK_TIMEOUT).await? {
+    if let (true, Some(relay)) = (webrtc.enabled, state.turn.get()) {
+        let to_turn = match sni::peek_sni(&tcp, SNI_PEEK_TIMEOUT).await? {
             SniPeek::Sni(name) => name == hosts.turn,
             SniPeek::NoSni => webrtc.passthrough_no_sni,
             SniPeek::NotTls => return Ok(()),
         };
-        if to_coturn {
-            let mut upstream = TcpStream::connect(webrtc.coturn_tls_addr).await?;
-            let _ = upstream.set_nodelay(true);
-            let (up, down) = tokio::io::copy_bidirectional(&mut tcp, &mut upstream).await?;
-            tracing::debug!(%peer, up, down, "turn passthrough closed");
+        if to_turn {
+            // TURN over TLS: same certificate, no ALPN (TURN clients send none
+            // or `stun.turn`, which an h2/http1.1 list would refuse).
+            let local = tcp.local_addr()?;
+            let tls = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, turn_acceptor.accept(tcp)).await??;
+            relay.serve_stream(tls, local, peer).await;
             return Ok(());
         }
     }

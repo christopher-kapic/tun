@@ -1,4 +1,4 @@
-//! systemd units for the server and (with WebRTC) the coturn restart on
+//! systemd units for the server (and cleanup of the coturn restart units that older setups installed on
 //! certificate renewal. A system install gets a hardened system unit running
 //! as the service user; a rootless install gets a user unit (lingering keeps
 //! it running without a login session).
@@ -70,36 +70,6 @@ WantedBy=multi-user.target
     )
 }
 
-/// The server itself cannot restart coturn (unprivileged, NoNewPrivileges),
-/// so a path unit watches the certificate and does it as root.
-fn cert_path_unit(cfg: &Config) -> String {
-    format!(
-        "[Unit]
-Description=Restart coturn when the cockpit-tunnel certificate changes
-
-[Path]
-PathChanged={fullchain}
-Unit={reload}
-
-[Install]
-WantedBy=multi-user.target
-",
-        fullchain = cfg.cert_dir().join("fullchain.pem").display(),
-        reload = CERT_RELOAD_UNIT,
-    )
-}
-
-fn cert_reload_unit() -> String {
-    "[Unit]
-Description=Restart coturn to load the renewed cockpit-tunnel certificate
-
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl try-restart coturn.service
-"
-    .to_string()
-}
-
 /// Copy the running binary to the service path when it differs (write to a
 /// temporary file and rename, so a running server keeps its old inode).
 /// Returns `true` if the installed binary changed.
@@ -142,11 +112,9 @@ pub fn install(cfg: &Config, config_path: &Path, config_changed: bool, mode: Mod
     if mode == Mode::System {
         let path_file = unit_dir.join(CERT_PATH_UNIT);
         let reload_file = unit_dir.join(CERT_RELOAD_UNIT);
-        if cfg.webrtc.enabled {
-            units_changed |= write_if_changed(&reload_file, cert_reload_unit().as_bytes(), 0o644)?;
-            units_changed |= write_if_changed(&path_file, cert_path_unit(cfg).as_bytes(), 0o644)?;
-        } else if path_file.exists() || reload_file.exists() {
-            // WebRTC was turned off since the last run.
+        // Older setups installed these to restart coturn on renewal; the
+        // built-in relay reads the certificate store directly.
+        if path_file.exists() || reload_file.exists() {
             let _ = mode.systemctl_run(&["disable", "--now", CERT_PATH_UNIT]);
             for f in [&path_file, &reload_file] {
                 if f.exists() {
@@ -159,9 +127,6 @@ pub fn install(cfg: &Config, config_path: &Path, config_changed: bool, mode: Mod
 
     if units_changed {
         mode.systemctl_run(&["daemon-reload"])?;
-    }
-    if mode == Mode::System && cfg.webrtc.enabled {
-        mode.systemctl_run(&["enable", "--now", CERT_PATH_UNIT])?;
     }
 
     let was_active = mode.systemctl_ok(&["is-active", "--quiet", &service_file]);

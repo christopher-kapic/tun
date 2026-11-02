@@ -91,6 +91,8 @@ pub struct AppState {
     tunnel_cache: Cache<Arc<TunnelLookup>>,
     session_cache: Cache<Grants>,
     visitor_lookups: tokio::sync::Semaphore,
+    /// The built-in TURN relay, once started (WebRTC enabled).
+    pub turn: std::sync::OnceLock<Arc<crate::turn_relay::Relay>>,
 }
 
 impl AppState {
@@ -106,6 +108,7 @@ impl AppState {
             tunnel_cache: Cache::new(TUNNEL_CACHE_TTL),
             session_cache: Cache::new(SESSION_CACHE_TTL),
             visitor_lookups: tokio::sync::Semaphore::new(VISITOR_LOOKUPS),
+            turn: std::sync::OnceLock::new(),
         })
     }
 

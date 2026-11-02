@@ -83,7 +83,7 @@ pub fn write_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Resul
 
 /// Write to `<path>.tmp` with `mode`, fsync, then rename over `path`.
 /// The temp file is created fresh with `mode` from the start (some targets,
-/// like coturn's config, hold secrets in world-traversable directories), and
+/// like the config, hold secrets in directories others may traverse), and
 /// a leftover or pre-planted file or symlink at that name is never reused.
 pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {

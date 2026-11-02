@@ -31,8 +31,6 @@ use crate::mode::{self, Mode};
 use crate::{acme, dns, tls, tokens, util};
 
 #[allow(unused_imports)] // part of the module contract; no caller outside setup yet
-pub use coturn::detect_coturn_user;
-
 #[derive(clap::Args, Debug, Default)]
 pub struct SetupArgs {
     /// Server hostname, e.g. tunnel.example.com. The API and sandbox tunnel use it,
@@ -61,7 +59,7 @@ pub struct SetupArgs {
     /// https://app.example.com,https://*.example.com — or * for any site (the default).
     #[arg(long)]
     pub frame_ancestors: Option<String>,
-    /// Enable WebRTC (coturn TURN relay): true or false.
+    /// Enable WebRTC (built-in STUN/TURN relay): true or false.
     #[arg(long)]
     pub webrtc: Option<bool>,
     /// Never prompt: use flags and current values, fail if something required is missing.
@@ -91,10 +89,9 @@ const PROVIDERS: [(DnsProviderKind, &str); 4] = [
 
 pub async fn run(config_path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     let mode = Mode::current();
-    let os = os::Os::detect()?;
     if mode.is_user() {
         println!("Rootless install for user {} (run with sudo for a system install).", mode::username()?);
-        user_preflight(&args)?;
+        user_preflight()?;
     }
 
     let existing = if config_path.exists() { Some(Config::load(config_path)?) } else { None };
@@ -107,7 +104,7 @@ pub async fn run(config_path: &Path, args: SetupArgs) -> anyhow::Result<()> {
     // Set only once the config holding its hash is on disk, so a failure
     // after that point still shows the token instead of losing it.
     let mut new_token: Option<String> = None;
-    let result = configure(config_path, existing.as_ref(), &mut cfg, &args, mode, os, &mut new_token).await;
+    let result = configure(config_path, existing.as_ref(), &mut cfg, &args, mode, &mut new_token).await;
     if let Err(e) = result {
         if let Some(token) = &new_token {
             eprintln!("\nSetup failed, but a new admin token was already saved. Keep it:");
@@ -126,7 +123,6 @@ async fn configure(
     cfg: &mut Config,
     args: &SetupArgs,
     mode: Mode,
-    mut os: os::Os,
     new_token: &mut Option<String>,
 ) -> anyhow::Result<()> {
     step("Detecting public IP addresses");
@@ -175,18 +171,29 @@ async fn configure(
         util::chown_recursive(&cfg.data_dir, SERVICE_USER)?;
     }
 
-    if cfg.webrtc.enabled {
-        step("coturn");
-        coturn::configure(cfg, &mut os)?;
-    } else if mode == Mode::System {
+    if mode == Mode::System {
         coturn::disable_if_managed()?;
+    } else if cfg.webrtc.enabled {
+        if let Some(cmd) = coturn::root_command_to_stop() {
+            bail!(
+                "a coturn service is running and holds port 3478, which the built-in TURN relay needs.\n\
+                 Stop it once, then run setup again:\n\n  sudo {cmd}"
+            );
+        }
     }
 
     step("Firewall");
     if mode == Mode::System {
         firewall::configure(cfg)?;
     } else {
-        println!("Rootless install: not touching the host firewall. Inbound TCP 80 and 443 must be open");
+        println!(
+            "Rootless install: not touching the host firewall. Inbound {} must be open",
+            firewall::required_ports(cfg)
+                .iter()
+                .map(|(p, proto)| format!("{p}/{proto}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         println!("(host firewall and any cloud provider firewall).");
     }
 
@@ -208,7 +215,7 @@ fn step(title: &str) {
 
 /// A rootless server needs two root-owned settings. Check both (and whether a
 /// root install is still around) and print one command that fixes everything.
-fn user_preflight(args: &SetupArgs) -> anyhow::Result<()> {
+fn user_preflight() -> anyhow::Result<()> {
     let user = mode::username()?;
     let port_start = std::fs::read_to_string("/proc/sys/net/ipv4/ip_unprivileged_port_start")
         .ok()
@@ -218,9 +225,6 @@ fn user_preflight(args: &SetupArgs) -> anyhow::Result<()> {
     let linger_ok = Path::new("/var/lib/systemd/linger").join(&user).exists();
     let system_install = Path::new(mode::SYSTEM_CONFIG_PATH).parent().is_some_and(Path::exists);
 
-    if args.webrtc == Some(true) {
-        bail!("WebRTC needs coturn, which needs a root install for now (run setup with sudo)");
-    }
     if ports_ok && linger_ok && !system_install {
         return Ok(());
     }
@@ -461,14 +465,7 @@ async fn ask_config(ask: &Ask, existing: Option<&Config>, args: &SetupArgs, mode
     cfg.dns.zone = choose_zone(ask, &cfg, args).await?;
 
     // 5. WebRTC.
-    if mode.is_user() {
-        if cfg.webrtc.enabled {
-            println!("WebRTC turned off: coturn needs a root install for now.");
-        }
-        cfg.webrtc.enabled = false;
-    } else {
-        cfg.webrtc.enabled = ask.bool(args.webrtc, "Enable WebRTC (coturn TURN relay)?", cfg.webrtc.enabled)?;
-    }
+    cfg.webrtc.enabled = ask.bool(args.webrtc, "Enable WebRTC (built-in STUN/TURN relay)?", cfg.webrtc.enabled)?;
 
     check_names(&cfg)?;
     print_layout(&cfg, before.as_ref());
@@ -738,14 +735,14 @@ fn generate_secrets(cfg: &mut Config) -> Option<String> {
     }
     if cfg.webrtc.enabled && cfg.webrtc.static_auth_secret.is_empty() {
         cfg.webrtc.static_auth_secret = tokens::random_secret();
-        println!("Generated the coturn static-auth-secret");
+        println!("Generated the TURN static auth secret");
     }
     minted
 }
 
 fn record_hosts(cfg: &Config) -> Vec<String> {
     let mut hosts = vec![format!("*.{}", cfg.preview_zone), cfg.api_host.clone(), cfg.tunnel_host.clone()];
-    if cfg.webrtc.enabled {
+    if cfg.webrtc.enabled && !cfg.covered_by_wildcard(&cfg.turn_host) {
         hosts.push(cfg.turn_host.clone());
     }
     hosts.sort();
@@ -1029,7 +1026,12 @@ mod tests {
         cfg.turn_host = "turn.tunnel.example.com".into();
         assert_eq!(record_hosts(&cfg), vec!["*.tunnel.example.com", "tunnel.example.com"]);
         cfg.webrtc.enabled = true;
+        // turn.<zone> is covered by the *.<zone> record (and certificate).
+        assert_eq!(record_hosts(&cfg).len(), 2);
+        assert!(!cfg.cert_names().contains(&cfg.turn_host));
+        cfg.turn_host = "turn.example.com".into();
         assert_eq!(record_hosts(&cfg).len(), 3);
+        assert!(cfg.cert_names().contains(&cfg.turn_host));
     }
 
     #[test]

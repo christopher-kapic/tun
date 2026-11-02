@@ -32,7 +32,7 @@ const LOGIN_PATH: &str = "/__login";
 /// TURN username subject for visitors of a public tunnel (no session).
 const PUBLIC_SUBJECT: &str = "public";
 const ICE_PATH: &str = "/__cockpit/ice";
-/// Gate-session hash prefix used as the TURN username subject (coturn log attribution).
+/// Gate-session hash prefix used as the TURN username subject (relay log attribution).
 const SUBJECT_LEN: usize = 8;
 /// The only request headers an unauthenticated preflight carries to the
 /// origin. A real preflight has no body and no credentials; anything else a

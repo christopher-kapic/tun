@@ -5,7 +5,7 @@ use super::os;
 use crate::config::Config;
 
 /// `(port or range, protocol)`; ranges use `min-max`.
-fn required_ports(cfg: &Config) -> Vec<(String, &'static str)> {
+pub fn required_ports(cfg: &Config) -> Vec<(String, &'static str)> {
     let mut ports = vec![("80".to_string(), "tcp"), ("443".to_string(), "tcp")];
     if cfg.webrtc.enabled {
         let w = &cfg.webrtc;
@@ -46,10 +46,6 @@ pub fn configure(cfg: &Config) -> anyhow::Result<()> {
             listed.join(", ")
         );
     }
-    println!(
-        "Reminder: keep port {} closed to the outside; coturn's TLS listener is reached only through 443.",
-        cfg.webrtc.coturn_tls_addr.port()
-    );
     Ok(())
 }
 
