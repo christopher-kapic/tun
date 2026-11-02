@@ -15,6 +15,7 @@
 //!   [`STREAM_NOT_EXPOSED`]). After `STREAM_OK` the stream is a raw byte pipe
 //!   to `127.0.0.1:<port>` (or `[::1]:<port>`).
 
+pub mod mux;
 pub mod ws_bridge;
 
 use std::io;
@@ -42,9 +43,6 @@ pub const GATE_COOKIE: &str = "__Secure-cockpit-gate";
 /// Outer WebSocket ping interval. Two missed pongs drop the connection.
 pub const PING_INTERVAL: Duration = Duration::from_secs(25);
 
-/// Per-stream Yamux receive window.
-pub const STREAM_WINDOW: u32 = 256 * 1024;
-
 /// Maximum length of one control-stream JSON line.
 pub const MAX_CONTROL_LINE: usize = 64 * 1024;
 
@@ -55,16 +53,6 @@ pub const STREAM_NOT_EXPOSED: u8 = 2;
 /// Client process exit codes (also documented in the client README).
 pub const EXIT_REVOKED: i32 = 3;
 pub const EXIT_REPLACED: i32 = 4;
-
-/// Shared Yamux configuration for both sides.
-pub fn yamux_config() -> tokio_yamux::Config {
-    tokio_yamux::Config {
-        max_stream_window_size: STREAM_WINDOW,
-        // Liveness is handled by WebSocket pings in `ws_bridge`.
-        enable_keepalive: false,
-        ..Default::default()
-    }
-}
 
 pub fn encode_preamble(port: u16) -> [u8; 2] {
     port.to_be_bytes()

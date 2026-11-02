@@ -22,7 +22,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_yamux::StreamHandle;
+use cockpit_tunnel_protocol::mux::Stream as StreamHandle;
 
 use crate::db::{HostHeaderMode, TunnelRow};
 use crate::headers::{self, ResponseCtx};

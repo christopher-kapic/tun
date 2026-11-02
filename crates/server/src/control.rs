@@ -9,10 +9,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use cockpit_tunnel_protocol::{
-    read_json_line, write_json_line, ws_bridge, yamux_config, ClientMsg, CloseReason, ServerMsg, PING_INTERVAL,
+    mux, read_json_line, write_json_line, ws_bridge, ClientMsg, CloseReason, ServerMsg, PING_INTERVAL,
     PROTOCOL_VERSION, TUNNEL_TOKEN_PREFIX,
 };
-use futures_util::StreamExt;
 use http::{header, HeaderValue, Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
@@ -122,18 +121,12 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
     let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(ws_config)).await;
     let (duplex, mut bridge) = ws_bridge::bridge(ws, PING_INTERVAL);
 
-    // Boxed so `next()` works regardless of whether `Session` is `Unpin`.
-    let session = tokio_yamux::Session::new_server(duplex, yamux_config());
+    let mut session = mux::Session::new_server(duplex);
     let control = session.control();
-    let mut session = Box::pin(session);
 
     let first = tokio::time::timeout(CONTROL_STREAM_TIMEOUT, session.next()).await;
     let ctrl_stream = match first {
-        Ok(Some(Ok(stream))) => stream,
-        Ok(Some(Err(e))) => {
-            bridge.abort();
-            return Err(anyhow::anyhow!("yamux error before control stream: {e}"));
-        }
+        Ok(Some(stream)) => stream,
         Ok(None) => {
             bridge.abort();
             return Err(anyhow::anyhow!("connection closed before control stream"));
@@ -152,18 +145,11 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
         let cancel = cancel.clone();
         let tunnel_id = tunnel.id.clone();
         tokio::spawn(async move {
-            while let Some(next) = session.next().await {
-                match next {
-                    Ok(stream) => {
-                        tracing::debug!(tunnel = %tunnel_id, "dropping unexpected inbound stream");
-                        drop(stream);
-                    }
-                    Err(e) => {
-                        tracing::debug!(tunnel = %tunnel_id, error = %e, "yamux session error");
-                        break;
-                    }
-                }
+            while let Some(stream) = session.next().await {
+                tracing::debug!(tunnel = %tunnel_id, "dropping unexpected inbound stream");
+                drop(stream);
             }
+            tracing::debug!(tunnel = %tunnel_id, "yamux session ended");
             cancel.cancel();
         })
     };
@@ -188,8 +174,8 @@ async fn run_session(state: Arc<AppState>, tunnel: TunnelRow, upgraded: Upgraded
 async fn control_loop(
     state: &Arc<AppState>,
     tunnel: &TunnelRow,
-    control: tokio_yamux::Control,
-    ctrl_stream: tokio_yamux::StreamHandle,
+    control: mux::Control,
+    ctrl_stream: mux::Stream,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let (rd, mut wr) = tokio::io::split(ctrl_stream);

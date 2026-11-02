@@ -14,7 +14,7 @@ pub struct LiveTunnel {
     pub conn_id: u64,
     pub tunnel_id: String,
     /// Clone per request and call `open_stream()`.
-    pub control: tokio_yamux::Control,
+    pub control: cockpit_tunnel_protocol::mux::Control,
     /// Ports the client has declared (and the server accepted).
     pub ports: RwLock<BTreeSet<u16>>,
     /// Outbound control-stream messages (written by the session's writer task).

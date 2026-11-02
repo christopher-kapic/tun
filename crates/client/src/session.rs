@@ -7,12 +7,11 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use cockpit_tunnel_protocol::{
-    decode_preamble, read_json_line, write_json_line, ws_bridge, yamux_config, ClientMsg, CloseReason, ServerMsg,
+    decode_preamble, read_json_line, write_json_line, ws_bridge, ClientMsg, CloseReason, ServerMsg,
     CONNECT_PATH, PING_INTERVAL, PROTOCOL_VERSION, STREAM_NOT_EXPOSED, STREAM_OK, STREAM_REFUSED,
 };
-use futures_util::StreamExt;
 use rand::Rng;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -21,7 +20,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_yamux::{Session, StreamHandle};
+use cockpit_tunnel_protocol::mux::{self, Stream as StreamHandle};
 use tracing::{debug, info, warn};
 
 use crate::daemon::{lock_poisoned, Daemon, Link, Pending, Reply, Welcome};
@@ -149,7 +148,7 @@ async fn establish(
 
     let (duplex, pump) = ws_bridge::bridge(ws, PING_INTERVAL);
     let _pump = AbortOnDrop(pump);
-    let session = Session::new_client(duplex, yamux_config());
+    let session = mux::Session::new_client(duplex);
     let mut control = session.control();
     let mut driver = AbortOnDrop(tokio::spawn(drive_session(daemon.clone(), session)));
 
@@ -232,19 +231,11 @@ fn close_end(reason: CloseReason) -> End {
 
 /// Own the Yamux session: polling it drives all streams. Every inbound stream
 /// is a server-opened data stream.
-async fn drive_session(daemon: Arc<Daemon>, session: Session<DuplexStream>) {
-    let mut session = Box::pin(session);
-    while let Some(next) = session.next().await {
-        match next {
-            Ok(stream) => {
-                tokio::spawn(handle_data_stream(daemon.clone(), stream));
-            }
-            Err(e) => {
-                debug!(error = ?e, "yamux session error");
-                break;
-            }
-        }
+async fn drive_session(daemon: Arc<Daemon>, mut session: mux::Session) {
+    while let Some(stream) = session.next().await {
+        tokio::spawn(handle_data_stream(daemon.clone(), stream));
     }
+    debug!("yamux session ended");
 }
 
 async fn write_control<W: AsyncWrite + Unpin>(mut wr: W, mut rx: mpsc::Receiver<ClientMsg>) {
