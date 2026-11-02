@@ -20,7 +20,7 @@ Cargo.toml                 workspace, shared dependency versions, release profil
 install.sh                 curl | sh installer: download, verify, exec `setup`
 crates/protocol/           wire messages, constants, mux (rust-yamux driver), WebSocket↔bytes bridge
 crates/server/             cockpit-tunnel-server (VPS)
-  src/main.rs              CLI: serve | setup | token rotate | status | backup | cert renew
+  src/main.rs              CLI: serve | setup | token rotate | health-token | status | backup | cert renew | client
   src/commands.rs          non-interactive subcommands; `serve` wires everything together
   src/listener.rs          :443 (SNI peek → coturn passthrough, else TLS + hyper auto) and :80 redirect
   src/edge.rs proxy.rs     visitor edge: lifecycle, gate, reserved paths, forwarding, WebSockets
@@ -101,6 +101,14 @@ cargo zigbuild --release --target aarch64-unknown-linux-musl -p cockpit-tunnel-s
 Admin commands: `cockpit-tunnel-server status`, `token rotate`, `backup <path>`,
 `cert renew [--force]`, and `client add <name> | list | delete <name>` (root only
 for a root install).
+
+Health check: `GET https://<host>/healthz` returns JSON (`status`, `database`,
+`certificate_days_left`, `version`): 200 when healthy, 503 when the database does
+not answer or the certificate is missing or expires within 7 days. It is open by
+default; `cockpit-tunnel-server health-token set` makes it answer only callers
+presenting the printed token (`Authorization: Bearer …` or `?token=…`, for uptime
+monitors) or the admin token, and a 404 to everyone else. `health-token clear`
+reopens it.
 
 ### Tunnels and access
 
